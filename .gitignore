@@ -1,0 +1,22 @@
+# Python
+venv-books-app/
+__pycache__/
+*.pyc
+
+# backend
+backend/database.db
+backend/Dockerfile
+backend/requirements.txt
+
+# Node
+frontend/node_modules/
+frontend/build/
+
+# Environment & secrets
+*.env
+
+# VSCode settings
+.vscode/
+
+# Screenshots
+Screenshots/

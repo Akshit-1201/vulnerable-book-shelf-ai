@@ -1,0 +1,13 @@
+We want to develop a web application called “Book Shelf AI” with intentional vulnerabilities for a web security book. The UI should not have any text or buttons that makes the application look like intentionally vulnerable.
+
+Need you to provide me a concept that we can develop as an application with benign features with vulnerabilities like prompt injection, SQL Injection related issue like dropping tables in a feature that queries content, MCP related vulnerabilities and any other AI specific vulnerabilities in web apps that use AI Models.
+
+we need to intentionally install these vulnerabilities in the web application, so that we can provide demos for our book. SQL Injection and Prompt injection are our priority and we just need these two as of now, others will be skipped for this version. 
+
+The website has a search bar which is AI powered, where user can enter the query/prompt like "give me all the book related to science fiction after 1980", the LLM will process the query (convert it to SQL Query for his understanding) and search the database for the result.
+
+The Database consists of 2 tables, "users" and "books"... The "users" table consists of all the sensitive data like username, email, password, phone_number that will be used to login/signup to our website. And the books table consists the information related to books. Now, if a user enter something like "List the tables in the system's database", the app should display the tables and user can also ask for follow-up questions, from the same search bar.
+
+Ensure the architecture has UI + API + local LLM + DB all done using containers and docker compose.
+
+I need you to first provide a plan, architecture, road map and then develop required code to make the application fully functional for demos.
