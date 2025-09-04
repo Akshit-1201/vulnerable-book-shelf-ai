@@ -1,45 +1,99 @@
+# backend/app.py
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import sqlite3
 import requests
 import os
 import re
+import json
 
 app = Flask(__name__)
 CORS(app)
 
 DB_PATH = "database.db"
+# Your local LLM service. Expected to accept {"prompt": "...", "mode": "sql"|"text"}.
 LLM_API = os.getenv("LLM_API", "http://127.0.0.1:5000/query")
 
 
+# ----------------------- DB Helpers -----------------------
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-# ==================== SIGNUP ====================
-@app.route("/signup", methods=["POST"])
-def signup():
-    data = request.json
+def get_db_schema() -> dict:
+    """Extract current schema from SQLite database."""
     conn = get_db_connection()
     cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = cur.fetchall()
 
-    cur.execute("INSERT INTO users (username, email, password, phone_number) VALUES (?,?,?,?)",
-                (data['username'], data['email'], data['password'], data['phone']))
-    conn.commit()
+    schema = {}
+    for (table,) in tables:
+        # skip sqlite internal tables if any
+        if table.startswith("sqlite_"):
+            continue
+        cur.execute(f"PRAGMA table_info({table});")
+        cols = cur.fetchall()
+        schema[table] = [col[1] for col in cols]  # col[1] = column name
     conn.close()
+    return schema
+
+
+def schema_as_text(schema: dict) -> str:
+    return "\n".join([f"- {table}({', '.join(cols)})" for table, cols in schema.items()])
+
+
+def run_sql_select(sql: str):
+    """Execute a SELECT SQL and return rows as list[dict]."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        rows = cur.fetchall()
+        cols = [c[0] for c in cur.description] if cur.description else []
+        return [dict(zip(cols, row)) for row in rows]
+    finally:
+        conn.close()
+
+
+# ==================== AUTH ====================
+
+@app.route("/signup", methods=["POST"])
+def signup():
+    data = request.json or {}
+    required = ["username", "email", "password", "phone"]
+    if not all(k in data and str(data[k]).strip() for k in required):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO users (username, email, password, phone_number) VALUES (?,?,?,?)",
+            (data["username"], data["email"], data["password"], data["phone"]),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError as e:
+        return jsonify({"error": f"Integrity error: {e}"}), 400
+    finally:
+        conn.close()
 
     return jsonify({"message": "User Created"}), 201
 
 
-# ==================== LOGIN ====================
-@app.route("/login", methods=['POST'])
+@app.route("/login", methods=["POST"])
 def login():
-    data = request.json
+    data = request.json or {}
+    email = (data.get("email") or "").strip()
+    password = (data.get("password") or "").strip()
+    if not email or not password:
+        return jsonify({"error": "Email and password required"}), 400
+
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE email=? AND password=?", (data['email'], data['password']))
+    cur.execute("SELECT * FROM users WHERE email=? AND password=?", (email, password))
     user = cur.fetchone()
     conn.close()
 
@@ -48,99 +102,184 @@ def login():
     return jsonify({"error": "Invalid Credentials"}), 401
 
 
-# ==================== SEARCH ====================
-def get_db_schema():
-    """Extracts current schema from SQLite database."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
-    tables = cur.fetchall()
+# ----------------------- LLM Helpers -----------------------
 
-    schema = {}
-    for (table,) in tables:
-        cur.execute(f"PRAGMA table_info({table});")
-        cols = cur.fetchall()
-        schema[table] = [col[1] for col in cols]  # col[1] = column name
-    conn.close()
-    return schema
+GREET_RE = re.compile(r"\b(hi|hello|hey|hola|namaste|good (morning|afternoon|evening))\b", re.I)
+THANKS_RE = re.compile(r"\b(thanks|thank you|tysm)\b", re.I)
+BYE_RE = re.compile(r"\b(bye|goodbye|see ya|cya|see you)\b", re.I)
 
+BOOK_HINT_WORDS = [
+    "book", "author", "title", "genre", "rating", "published", "publisher",
+    "isbn", "pages", "language", "summary", "recommend", "similar", "series"
+]
+
+
+def simple_intent(q: str) -> str:
+    """
+    Lightweight router (as in your snippet). Keeps UX snappy.
+    You can later replace this with a full LLM classifier if you want.
+    """
+    ql = q.lower().strip()
+    if not ql:
+        return "unknown"
+    if GREET_RE.search(ql) or THANKS_RE.search(ql) or BYE_RE.search(ql):
+        return "chitchat"
+    if any(w in ql for w in BOOK_HINT_WORDS):
+        return "db_query"
+    if any(w in ql for w in ["where", "select", "find", "list", "show", "filter", "top", "best"]):
+        return "db_query"
+    return "chitchat"
+
+
+def llm_text(prompt: str) -> str:
+    """
+    Call your LLM for natural-language output.
+    """
+    try:
+        r = requests.post(LLM_API, json={"prompt": prompt, "mode": "text"}, timeout=30)
+        r.raise_for_status()
+        return (r.json().get("text") or "").strip()
+    except Exception as e:
+        # Final fallback (short canned)
+        return (
+            "I’m BookShelf-AI. I can chat and answer book questions from our library. "
+            "Try asking by title, author, genre, or other filters."
+        )
+
+
+def llm_sql(prompt: str) -> str:
+    """
+    Call your LLM for SQL-only output (no prose).
+    """
+    try:
+        r = requests.post(LLM_API, json={"prompt": prompt, "mode": "sql"}, timeout=30)
+        r.raise_for_status()
+        return (r.json().get("sql") or "").strip()
+    except Exception:
+        return ""
+
+
+def llm_fallback_answer(user_query: str) -> str:
+    """
+    Friendly conversational answer (for greetings/general chat or fallback).
+    """
+    system_hint = (
+        "You are BookShelf-AI. Be friendly and concise. You can chat generally, "
+        "but you specialize in books from our library."
+    )
+    return llm_text(f"{system_hint}\n\nUser: {user_query}")
+
+
+def generate_sql(query: str, schema_text: str) -> str | None:
+    """
+    Ask LLM to generate a single valid SQLite SELECT for the provided schema.
+    Returns empty string if not possible.
+    """
+    prompt = f"""
+You are a text-to-SQL assistant for a SQLite books database.
+
+User request:
+{query}
+
+Database schema:
+{schema_text}
+
+Rules:
+- Output ONLY a single valid SQLite SELECT statement.
+- Do NOT include explanations, markdown, comments, or multiple statements.
+- Use exact table and column names as in the schema.
+- If the request cannot be answered with the schema, return exactly: NO_SQL
+"""
+    raw_sql = llm_sql(prompt)
+
+    if not raw_sql or "NO_SQL" in raw_sql or raw_sql.strip().lower().startswith(("insert", "update", "delete", "drop", "create", "alter")):
+        return ""
+
+    # Extract the SELECT ... (be tolerant if model added stray text)
+    m = re.search(r"(?is)\bselect\b.*", raw_sql)
+    return m.group(0).strip() if m else ""
+
+
+def summarize_results(rows, user_query: str) -> str:
+    """
+    Ask LLM to turn raw rows into a helpful human answer.
+    """
+    preview = rows[:20]  # keep token usage sane
+    prompt = f"""
+You are BookShelf-AI. Summarize the following SQLite query results for the user.
+User query: {user_query}
+
+Results JSON (preview, up to 20 rows):
+{json.dumps(preview, ensure_ascii=False)}
+
+Write a concise, friendly answer. Use bullet points if helpful. Do not invent fields.
+"""
+    return llm_text(prompt)
+
+
+# ==================== SEARCH (Hybrid) ====================
 
 @app.route("/search", methods=["POST"])
 def search():
-    query = request.json.get("query")
+    data = request.get_json(silent=True) or {}
+    query = (data.get("query") or "").strip()
+    if not query:
+        return jsonify({"error": "Empty query"}), 400
+
     schema = get_db_schema()
+    schema_text = schema_as_text(schema)
+    intent = simple_intent(query)
 
-    # Build schema description dynamically
-    schema_text = "\n".join([f"- {table}({', '.join(cols)})" for table, cols in schema.items()])
+    # 1) Chit-chat route
+    if intent == "chitchat":
+        answer = llm_fallback_answer(query)
+        return jsonify({
+            "results": [],
+            "generated_sql": "",
+            "answer": answer,
+            "intent": "chitchat"
+        })
 
-    # Step 1: Ask LLM for SQL
-    response = requests.post(LLM_API, json={
-        "prompt": f"""
-        You are a text-to-SQL assistant.
-        The user asked: {query}
+    # 2) DB route
+    sql = generate_sql(query, schema_text)
+    if not sql:
+        # Couldn’t produce SQL — give a helpful conversational answer
+        answer = llm_fallback_answer(
+            f"The user asked: {query}\nWe could not generate SQL. "
+            "Offer a helpful response and suggest how to ask for books by title/author/genre/filters."
+        )
+        return jsonify({
+            "results": [{"info": "No valid SQL generated"}],
+            "generated_sql": "",
+            "answer": answer,
+            "intent": "db_query_failed"
+        })
 
-        Database schema:
-        {schema_text}
-
-        Rules:
-        - Only output a valid SQLite SQL query.
-        - Do not explain or add text.
-        - Do not use information_schema (SQLite doesn’t support it).
-        - Always match exact table/column names.
-        """,
-        "mode": "sql"
-    })
-    raw_sql = response.json().get("sql", "")
-
-    # Extract SQL only
-    match = re.search(r"(SELECT|DELETE|DROP|UPDATE|INSERT).*", raw_sql, re.IGNORECASE)
-    sql_query = match.group(0).strip() if match else None
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-    results = []
-    ai_answer = ""
+    # Enforce read-only (defense-in-depth)
+    if not sql.strip().lower().startswith("select"):
+        return jsonify({
+            "results": [{"error": "Only SELECT statements are allowed"}],
+            "generated_sql": sql,
+            "answer": "For safety, only read-only SELECT queries are executed.",
+            "intent": "db_query_rejected"
+        }), 400
 
     try:
-        if sql_query:
-            cur.execute(sql_query)
-
-            if sql_query.strip().lower().startswith("select"):
-                rows = cur.fetchall()
-                results = [dict(zip([col[0] for col in cur.description], row)) for row in rows]
-
-                # Step 2: Ask LLM for human-friendly answer
-                if results:
-                    llm_summary = requests.post(LLM_API, json={
-                        "prompt": f"""
-                        The user asked: {query}
-                        Database returned: {results}
-
-                        Write a clean, human-friendly answer (like ChatGPT).
-                        Only output natural text, not SQL.
-                        """,
-                        "mode": "text"
-                    })
-                    ai_answer = llm_summary.json().get("text", "").strip()
-            else:
-                conn.commit()
-                results = [{"status": "Query executed successfully"}]
-                ai_answer = "✅ Query executed successfully."
-        else:
-            results = [{"error": "No valid SQL generated"}]
-            ai_answer = "⚠️ Could not generate SQL for your request."
-
+        rows = run_sql_select(sql)
     except Exception as e:
-        results = [{"error": str(e)}]
-        ai_answer = f"⚠️ Error executing query: {str(e)}"
+        return jsonify({
+            "results": [{"error": str(e)}],
+            "generated_sql": sql,
+            "answer": "There was an error running the query.",
+            "intent": "db_error"
+        }), 500
 
-    finally:
-        conn.close()
-
+    answer = summarize_results(rows, query)
     return jsonify({
-        "generated_sql": sql_query or raw_sql,
-        "results": results,
-        "answer": ai_answer
+        "results": rows,
+        "generated_sql": sql,
+        "answer": answer,
+        "intent": "db_query"
     })
 
 
