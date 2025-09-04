@@ -36,44 +36,7 @@ Phase 1: Concept & Roadmap
         
     *   Demonstrates how attacker can extract or destroy data.
 
-```
-vulnerable-book-shelf-ai
-├─ backend
-│  ├─ app.py
-│  └─ init_db.py
-├─ frontend
-│  ├─ package-lock.json
-│  ├─ package.json
-│  ├─ public
-│  │  ├─ favicon.ico
-│  │  ├─ index.html
-│  │  ├─ logo192.png
-│  │  ├─ logo512.png
-│  │  ├─ manifest.json
-│  │  └─ robots.txt
-│  ├─ README.md
-│  └─ src
-│     ├─ App.css
-│     ├─ App.js
-│     ├─ App.test.js
-│     ├─ components
-│     │  ├─ Login.js
-│     │  ├─ Search.js
-│     │  └─ Signup.js
-│     ├─ index.css
-│     ├─ index.js
-│     ├─ logo.svg
-│     ├─ reportWebVitals.js
-│     └─ setupTests.js
-├─ llm
-│  ├─ app.py
-│  ├─ app1.py
-│  └─ app2.py
-├─ lol.txt
-├─ prompt.txt
-└─ README.md
 
-```
 ```
 vulnerable-book-shelf-ai
 ├─ backend
