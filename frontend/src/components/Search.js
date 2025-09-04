@@ -8,7 +8,8 @@ export default function Search() {
   const [sql, setSql] = useState("");
   const [answer, setAnswer] = useState("");
 
-  const handleSearch = async () => {
+  const handleSearch = async (e) => {
+    e.preventDefault();
     try {
       const res = await axios.post("http://127.0.0.1:8000/search", { query });
       setResults(res.data.results || []);
@@ -20,39 +21,31 @@ export default function Search() {
   };
 
   return (
-    <div style={{ maxWidth: "700px", margin: "0 auto" }}>
-      <h3>📚 Book Shelf AI</h3>
-      <input
-        placeholder="Ask AI about books..."
-        style={{ width: "400px", padding: "8px", marginRight: "10px" }}
-        onChange={(e) => setQuery(e.target.value)}
-      />
-      <button onClick={handleSearch}>Search</button>
+    <div className="pt-24 flex flex-col items-center min-h-screen bg-gray-100">
+      <h2 className="text-3xl font-bold mb-6">🔎 BookShelf-AI Search</h2>
+      <form onSubmit={handleSearch} className="flex space-x-2 w-full max-w-lg">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Ask AI about books..."
+          className="flex-1 px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+          required
+        />
+        <button className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg">
+          Search
+        </button>
+      </form>
 
       {sql && (
-        <p style={{ fontSize: "14px", color: "#666" }}>
+        <p className="mt-4 text-sm text-gray-600">
           <strong>Generated SQL:</strong> {sql}
         </p>
       )}
 
-      {/* {results.length > 0 && (
-        <div>
-          <h4>📊 Raw Results</h4>
-          <pre>{JSON.stringify(results, null, 2)}</pre>
-        </div>
-      )} */}
-
       {answer && (
-        <div
-          style={{
-            marginTop: "20px",
-            padding: "15px",
-            border: "1px solid #ddd",
-            borderRadius: "8px",
-            backgroundColor: "#f4f8ff"
-          }}
-        >
-          <h4>🤖 AI Answer</h4>
+        <div className="mt-6 bg-white shadow p-4 rounded-lg w-full max-w-lg">
+          <h4 className="font-semibold mb-2">🤖 AI Answer</h4>
           <ReactMarkdown>{answer}</ReactMarkdown>
         </div>
       )}

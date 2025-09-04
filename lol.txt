@@ -1,0 +1,9 @@
+The website should have the following:
+- A Nav Bar in which there is the main page, Login, Signup and Logout. (it will be fixed)
+- The landing page should be the login page.
+- After login, the user can access the BookShelf-AI Search.
+- If the user is not present in the database, he will go for a signup and the same details will be added into the database.
+You have the schema for the database, so create the form accordingly.
+- Finally, after signup and login, the user will be able to use our AI Search.
+
+Add the styling to the website so to make it very intriguing to the user.
