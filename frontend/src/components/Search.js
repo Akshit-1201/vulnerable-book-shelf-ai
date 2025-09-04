@@ -4,19 +4,16 @@ import ReactMarkdown from "react-markdown";
 
 export default function Search() {
   const [query, setQuery] = useState("");
-  const [sql, setSql] = useState("");
   const [answer, setAnswer] = useState("");
   const [loading, setLoading] = useState(false);
 
   const handleSearch = async (e) => {
     e.preventDefault();
     setLoading(true);
-    setSql("");
     setAnswer("");
 
     try {
       const res = await axios.post("http://127.0.0.1:8000/search", { query });
-      setSql(res.data.generated_sql || "");
       setAnswer(res.data.answer || "");
     } catch (err) {
       alert("Search failed: " + (err.response?.data?.error || err.message));
@@ -54,13 +51,6 @@ export default function Search() {
           <div className="h-6 w-6 rounded-full border-4 border-gray-300 border-t-blue-600 animate-spin" />
           <div className="text-lg text-gray-700">Generating answer…</div>
         </div>
-      )}
-
-      {/* Generated SQL */}
-      {!loading && sql && (
-        <p className="mt-6 text-lg text-gray-700 w-full max-w-2xl">
-          <strong>Generated SQL:</strong> {sql}
-        </p>
       )}
 
       {/* AI Answer */}

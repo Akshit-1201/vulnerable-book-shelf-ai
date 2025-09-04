@@ -10,17 +10,16 @@ import json
 app = Flask(__name__)
 CORS(app)
 
-DB_PATH = "database.db"
+DB_PATH = "../data/database.db"
 # Your local LLM service. Expected to accept {"prompt": "...", "mode": "sql"|"text"}.
 LLM_API = os.getenv("LLM_API", "http://127.0.0.1:5000/query")
 
-
 # ----------------------- DB Helpers -----------------------
+
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def get_db_schema() -> dict:
     """Extract current schema from SQLite database."""
@@ -28,7 +27,7 @@ def get_db_schema() -> dict:
     cur = conn.cursor()
     cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
     tables = cur.fetchall()
-
+    
     schema = {}
     for (table,) in tables:
         # skip sqlite internal tables if any
@@ -37,13 +36,12 @@ def get_db_schema() -> dict:
         cur.execute(f"PRAGMA table_info({table});")
         cols = cur.fetchall()
         schema[table] = [col[1] for col in cols]  # col[1] = column name
+    
     conn.close()
     return schema
 
-
 def schema_as_text(schema: dict) -> str:
     return "\n".join([f"- {table}({', '.join(cols)})" for table, cols in schema.items()])
-
 
 def run_sql_select(sql: str):
     """Execute a SELECT SQL and return rows as list[dict]."""
@@ -57,6 +55,16 @@ def run_sql_select(sql: str):
     finally:
         conn.close()
 
+def run_sql_modify(sql: str):
+    """Execute INSERT/UPDATE/DELETE SQL and return affected rows count."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
 
 # ==================== AUTH ====================
 
@@ -82,12 +90,12 @@ def signup():
 
     return jsonify({"message": "User Created"}), 201
 
-
 @app.route("/login", methods=["POST"])
 def login():
     data = request.json or {}
     email = (data.get("email") or "").strip()
     password = (data.get("password") or "").strip()
+
     if not email or not password:
         return jsonify({"error": "Email and password required"}), 400
 
@@ -99,8 +107,8 @@ def login():
 
     if user:
         return jsonify({"message": "Login Successful"})
-    return jsonify({"error": "Invalid Credentials"}), 401
 
+    return jsonify({"error": "Invalid Credentials"}), 401
 
 # ----------------------- LLM Helpers -----------------------
 
@@ -109,27 +117,43 @@ THANKS_RE = re.compile(r"\b(thanks|thank you|tysm)\b", re.I)
 BYE_RE = re.compile(r"\b(bye|goodbye|see ya|cya|see you)\b", re.I)
 
 BOOK_HINT_WORDS = [
-    "book", "author", "title", "genre", "rating", "published", "publisher",
-    "isbn", "pages", "language", "summary", "recommend", "similar", "series"
+    "book", "author", "title", "genre", "rating", "published", "publisher", "isbn",
+    "pages", "language", "summary", "recommend", "similar", "series"
 ]
-
 
 def simple_intent(q: str) -> str:
     """
-    Lightweight router (as in your snippet). Keeps UX snappy.
-    You can later replace this with a full LLM classifier if you want.
+    Lightweight router. Prioritize DB-related keywords first so queries like
+    "Hey, list all the users in your database" are treated as DB queries, not chitchat.
     """
-    ql = q.lower().strip()
+    ql = (q or "").lower().strip()
     if not ql:
         return "unknown"
-    if GREET_RE.search(ql) or THANKS_RE.search(ql) or BYE_RE.search(ql):
-        return "chitchat"
+
+    # Check for delete operations first
+    if any(word in ql for word in ["delete", "remove", "drop"]):
+        return "db_delete"
+
+    # Strong DB-related hints (checked first)
+    DB_HINT_WORDS = [
+        "user", "users", "users table", "users_table", "table", "tables", "row", "rows",
+        "column", "columns", "insert", "update", "select", "find", "list", "show",
+        "filter", "where", "count", "all the", "everything", "dump", "schema"
+    ]
+    
+    if any(w in ql for w in DB_HINT_WORDS):
+        return "db_query"
+
+    # Book-specific hints (kept for book-focused queries)
     if any(w in ql for w in BOOK_HINT_WORDS):
         return "db_query"
-    if any(w in ql for w in ["where", "select", "find", "list", "show", "filter", "top", "best"]):
-        return "db_query"
-    return "chitchat"
 
+    # Greeting/thanks/bye - fallback to chitchat
+    if GREET_RE.search(ql) or THANKS_RE.search(ql) or BYE_RE.search(ql):
+        return "chitchat"
+
+    # Default to chitchat for anything else
+    return "chitchat"
 
 def llm_text(prompt: str) -> str:
     """
@@ -142,10 +166,9 @@ def llm_text(prompt: str) -> str:
     except Exception as e:
         # Final fallback (short canned)
         return (
-            "I’m BookShelf-AI. I can chat and answer book questions from our library. "
+            "I'm BookShelf-AI. I can chat and answer book questions from our library. "
             "Try asking by title, author, genre, or other filters."
         )
-
 
 def llm_sql(prompt: str) -> str:
     """
@@ -158,7 +181,6 @@ def llm_sql(prompt: str) -> str:
     except Exception:
         return ""
 
-
 def llm_fallback_answer(user_query: str) -> str:
     """
     Friendly conversational answer (for greetings/general chat or fallback).
@@ -169,36 +191,41 @@ def llm_fallback_answer(user_query: str) -> str:
     )
     return llm_text(f"{system_hint}\n\nUser: {user_query}")
 
-
-def generate_sql(query: str, schema_text: str) -> str | None:
+def generate_sql(query: str, schema_text: str, allow_modify: bool = False) -> str | None:
     """
-    Ask LLM to generate a single valid SQLite SELECT for the provided schema.
+    Ask LLM to generate a single valid SQLite statement for the provided schema.
     Returns empty string if not possible.
     """
+    allowed_operations = "SELECT" if not allow_modify else "SELECT, INSERT, UPDATE, DELETE"
+    
     prompt = f"""
 You are a text-to-SQL assistant for a SQLite books database.
 
-User request:
-{query}
+User request: {query}
 
 Database schema:
 {schema_text}
 
 Rules:
-- Output ONLY a single valid SQLite SELECT statement.
+- Output ONLY a single valid SQLite statement ({allowed_operations}).
 - Do NOT include explanations, markdown, comments, or multiple statements.
 - Use exact table and column names as in the schema.
 - If the request cannot be answered with the schema, return exactly: NO_SQL
 """
+
     raw_sql = llm_sql(prompt)
-
-    if not raw_sql or "NO_SQL" in raw_sql or raw_sql.strip().lower().startswith(("insert", "update", "delete", "drop", "create", "alter")):
+    if not raw_sql or "NO_SQL" in raw_sql:
         return ""
-
-    # Extract the SELECT ... (be tolerant if model added stray text)
-    m = re.search(r"(?is)\bselect\b.*", raw_sql)
+    
+    # If we don't allow modify operations, reject them
+    if not allow_modify:
+        if raw_sql.strip().lower().startswith(("insert", "update", "delete", "drop", "create", "alter")):
+            return ""
+    
+    # Extract the SQL statement (be tolerant if model added stray text)
+    sql_pattern = r"(?is)\b(select|insert|update|delete)\b.*"
+    m = re.search(sql_pattern, raw_sql)
     return m.group(0).strip() if m else ""
-
 
 def summarize_results(rows, user_query: str) -> str:
     """
@@ -207,6 +234,7 @@ def summarize_results(rows, user_query: str) -> str:
     preview = rows[:20]  # keep token usage sane
     prompt = f"""
 You are BookShelf-AI. Summarize the following SQLite query results for the user.
+
 User query: {user_query}
 
 Results JSON (preview, up to 20 rows):
@@ -216,13 +244,13 @@ Write a concise, friendly answer. Use bullet points if helpful. Do not invent fi
 """
     return llm_text(prompt)
 
-
 # ==================== SEARCH (Hybrid) ====================
 
 @app.route("/search", methods=["POST"])
 def search():
     data = request.get_json(silent=True) or {}
     query = (data.get("query") or "").strip()
+    
     if not query:
         return jsonify({"error": "Empty query"}), 400
 
@@ -240,10 +268,51 @@ def search():
             "intent": "chitchat"
         })
 
-    # 2) DB route
-    sql = generate_sql(query, schema_text)
+    # 2) Delete route
+    if intent == "db_delete":
+        sql = generate_sql(query, schema_text, allow_modify=True)
+        if not sql:
+            answer = llm_fallback_answer(
+                f"I couldn't understand how to delete that. "
+                f"Try being more specific about what you want to delete from which table."
+            )
+            return jsonify({
+                "results": [{"info": "Could not generate delete SQL"}],
+                "generated_sql": "",
+                "answer": answer,
+                "intent": "db_delete_failed"
+            })
+        
+        # Make sure it's actually a DELETE statement
+        if not sql.strip().lower().startswith("delete"):
+            return jsonify({
+                "results": [{"error": "Not a valid delete operation"}],
+                "generated_sql": sql,
+                "answer": "I can only process DELETE statements for delete requests.",
+                "intent": "db_delete_rejected"
+            }), 400
+        
+        try:
+            affected_rows = run_sql_modify(sql)
+            answer = f"Successfully deleted {affected_rows} record(s) from the database."
+            return jsonify({
+                "results": [{"affected_rows": affected_rows}],
+                "generated_sql": sql,
+                "answer": answer,
+                "intent": "db_delete_success"
+            })
+        except Exception as e:
+            return jsonify({
+                "results": [{"error": str(e)}],
+                "generated_sql": sql,
+                "answer": "There was an error executing the delete operation.",
+                "intent": "db_delete_error"
+            }), 500
+
+    # 3) Regular DB query route
+    sql = generate_sql(query, schema_text, allow_modify=False)
     if not sql:
-        # Couldn’t produce SQL — give a helpful conversational answer
+        # Couldn't produce SQL — give a helpful conversational answer
         answer = llm_fallback_answer(
             f"The user asked: {query}\nWe could not generate SQL. "
             "Offer a helpful response and suggest how to ask for books by title/author/genre/filters."
@@ -255,12 +324,12 @@ def search():
             "intent": "db_query_failed"
         })
 
-    # Enforce read-only (defense-in-depth)
+    # Enforce read-only for regular queries (defense-in-depth)
     if not sql.strip().lower().startswith("select"):
         return jsonify({
-            "results": [{"error": "Only SELECT statements are allowed"}],
+            "results": [{"error": "Only SELECT statements are allowed for regular queries"}],
             "generated_sql": sql,
-            "answer": "For safety, only read-only SELECT queries are executed.",
+            "answer": "For safety, only read-only SELECT queries are executed for regular searches.",
             "intent": "db_query_rejected"
         }), 400
 
@@ -281,7 +350,6 @@ def search():
         "answer": answer,
         "intent": "db_query"
     })
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)

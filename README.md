@@ -74,3 +74,46 @@ vulnerable-book-shelf-ai
 └─ README.md
 
 ```
+```
+vulnerable-book-shelf-ai
+├─ backend
+│  └─ app.py
+├─ data
+│  ├─ database.db
+│  └─ init_db.py
+├─ frontend
+│  ├─ package-lock.json
+│  ├─ package.json
+│  ├─ postcss.config.js
+│  ├─ public
+│  │  ├─ favicon.ico
+│  │  ├─ index.html
+│  │  ├─ logo192.png
+│  │  ├─ logo512.png
+│  │  ├─ manifest.json
+│  │  └─ robots.txt
+│  ├─ README.md
+│  ├─ src
+│  │  ├─ App.css
+│  │  ├─ App.js
+│  │  ├─ App.test.js
+│  │  ├─ components
+│  │  │  ├─ Login.js
+│  │  │  ├─ Navbar.js
+│  │  │  ├─ Search.js
+│  │  │  └─ Signup.js
+│  │  ├─ index.css
+│  │  ├─ index.js
+│  │  ├─ logo.svg
+│  │  ├─ reportWebVitals.js
+│  │  └─ setupTests.js
+│  └─ tailwind.config.js
+├─ llm
+│  ├─ app.py
+│  ├─ app1.py
+│  └─ app2.py
+├─ lol.txt
+├─ prompt.txt
+└─ README.md
+
+```
