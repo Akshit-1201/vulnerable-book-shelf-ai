@@ -10,7 +10,7 @@ import json
 app = Flask(__name__)
 CORS(app)
 
-DB_PATH = "../data/database.db"
+DB_PATH = os.getenv("DB_PATH", "../data/database.db")
 # Your local LLM service. Expected to accept {"prompt": "...", "mode": "sql"|"text"}.
 LLM_API = os.getenv("LLM_API", "http://127.0.0.1:5000/query")
 
