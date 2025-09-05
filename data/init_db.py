@@ -1,6 +1,6 @@
 import sqlite3
 
-conn = sqlite3.connect("database.db")
+conn = sqlite3.connect("./data/database.db")
 c = conn.cursor()
 
 # Drop old tables
