@@ -1,18 +1,3 @@
-#!/usr/bin/env python3
-"""
-data/init_db.py
-
-Initializes the SQLite database for Vulnerable Book Shelf (version-2).
-
-- Creates ../data/database.db (relative to project root)
-- Creates tables: users (with role), books
-- Seeds an admin user with plaintext password (INTENTIONAL for vulnerability demo)
-- Seeds a handful of sample books (if not already present)
-
-Usage:
-    python data/init_db.py
-"""
-
 import os
 import sqlite3
 from pathlib import Path
@@ -84,10 +69,93 @@ def seed_sample_books(conn: sqlite3.Connection):
         return
 
     sample_books = [
-        ("The Pragmatic Programmer", "Andrew Hunt & David Thomas", "Software", "Classic software engineering best practices."),
-        ("Clean Code", "Robert C. Martin", "Software", "A handbook of agile software craftsmanship."),
-        ("Designing Data-Intensive Applications", "Martin Kleppmann", "Data", "Principles of reliable, scalable systems."),
-        ("Deep Work", "Cal Newport", "Self-help", "Rules for focused success in a distracted world."),
+        ("Dune", 
+         "Frank Herbert", 
+         "Science Fiction", 
+         "Epic story of politics, religion, and ecology on the desert planet Arrakis."),
+        
+        ("Neuromancer", 
+         "William Gibson", 
+         "Science Fiction", 
+         "Cyberpunk classic that introduced cyberspace and reshaped science fiction."),
+        
+        ("The Hobbit", 
+        "J.R.R. Tolkien", 
+        "Fantasy", 
+        "The adventure of Bilbo Baggins as he journeys with dwarves to reclaim treasure from Smaug the dragon."),
+        
+        ("Harry Potter and the Sorcerer's Stone", 
+         "J.K. Rowling", 
+         "Fantasy", 
+         "The first story of Harry Potter discovering he is a wizard and attending Hogwarts School of Witchcraft and Wizardry."),
+        
+        ("Foundation", 
+         "Isaac Asimov", 
+         "Science Fiction", 
+         "The beginning of Asimov's Foundation saga, about the fall and rebirth of a galactic empire."),
+        
+        ("1984", 
+         "George Orwell", 
+         "Dystopian", 
+         "A chilling novel about surveillance, totalitarianism, and loss of individuality."),
+        
+        ("Brave New World", 
+         "Aldous Huxley", 
+         "Dystopian", 
+         "A futuristic society driven by technology, pleasure, and control."),
+        
+        ("Fahrenheit 451", 
+         "Ray Bradbury", 
+         "Dystopian", 
+         "A fireman burns books in a world where reading is forbidden."),
+        
+        ("The Catcher in the Rye", 
+         "J.D. Salinger", "Classic", 
+         "Holden Caulfield narrates a story of teenage angst and rebellion."),
+        
+        ("To Kill a Mockingbird", 
+         "Harper Lee", "Classic", 
+         "A powerful novel on race, justice, and morality in the American South."),
+        
+        ("The Lord of the Rings: The Fellowship of the Ring", 
+         "J.R.R. Tolkien", 
+         "Fantasy", 
+         "The first volume of the epic quest to destroy the One Ring."),
+        
+        ("Snow Crash", 
+         "Neal Stephenson", 
+         "Science Fiction", 
+         "A fast-paced cyberpunk adventure mixing virtual reality and ancient history."),
+        
+        ("The Martian", 
+         "Andy Weir", 
+         "Science Fiction", 
+         "An astronaut stranded on Mars fights to survive using science and ingenuity."),
+        
+        ("Ender's Game", 
+         "Orson Scott Card", 
+         "Science Fiction", 
+         "A young boy is trained to lead humanity's fight against alien invaders."),
+        
+        ("A Game of Thrones", 
+         "George R.R. Martin", 
+         "Fantasy", 
+         "The first book of A Song of Ice and Fire, filled with intrigue, battles, and betrayal."),
+        
+        ("Dracula", 
+         "Bram Stoker", 
+         "Horror", 
+         "The gothic classic that introduced Count Dracula to the world."),
+        
+        ("Frankenstein", 
+         "Mary Shelley", 
+         "Horror", 
+         "The story of Victor Frankenstein and the monster he creates."),
+        
+        ("The Name of the Wind", 
+         "Patrick Rothfuss", 
+         "Fantasy", 
+         "The tale of Kvothe, a gifted musician and magician, recounting his life story."),
     ]
 
     cur.executemany("""
