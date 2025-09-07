@@ -1,3 +1,5 @@
+Version-1:
+
 The website should have the following:
 - A Nav Bar in which there is the main page, Login, Signup and Logout. (it will be fixed)
 - The landing page should be the login page.
@@ -7,3 +9,18 @@ You have the schema for the database, so create the form accordingly.
 - Finally, after signup and login, the user will be able to use our AI Search.
 
 Add the styling to the website so to make it very intriguing to the user.
+
+
+
+Version-1.1:
+
+Now we need to arrange the users of this website... 
+Some will be normal users and some will be admins.
+
+Admins have all the priviliege to read and white the data in the website (like adding books, editing the books etc.)
+
+But here's the catch, as we are building a Vulnerable App, 
+we need to install Privilege Escalation to that.
+Example:
+Suppose, a normal user logs in the website, now he has the search bar to check for the database data (prompt injection as we have done in V-1), from there he will get the admin username and password... and he can log into the website using those credentials and change the content of the website database.
+
