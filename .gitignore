@@ -4,9 +4,6 @@ __pycache__/
 *.pyc
 
 # backend
-backend/database.db
-backend/Dockerfile
-backend/requirements.txt
 
 # Node
 frontend/node_modules/
