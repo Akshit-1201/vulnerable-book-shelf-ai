@@ -32,19 +32,23 @@ Phase 1: Concept & Roadmap
     
     *   Queries are executed without sanitization.
         
-    *   Example: search input → "science fiction' OR '1'='1"; DROP TABLE users;--"
-        
-    *   Demonstrates how attacker can extract or destroy data.
+    *   Demonstrates how attacker can extract or destroy data.s
 
 
 ```
 vulnerable-book-shelf-ai
 ├─ backend
-│  └─ app.py
+│  ├─ .dockerignore
+│  ├─ app.py
+│  ├─ Dockerfile
+│  └─ requirements.txt
 ├─ data
 │  ├─ database.db
 │  └─ init_db.py
+├─ docker-compose.yml
 ├─ frontend
+│  ├─ .dockerignore
+│  ├─ Dockerfile
 │  ├─ package-lock.json
 │  ├─ package.json
 │  ├─ postcss.config.js
@@ -61,6 +65,8 @@ vulnerable-book-shelf-ai
 │  │  ├─ App.js
 │  │  ├─ App.test.js
 │  │  ├─ components
+│  │  │  ├─ AdminPanel.js
+│  │  │  ├─ EditUser.js
 │  │  │  ├─ Login.js
 │  │  │  ├─ Navbar.js
 │  │  │  ├─ Search.js
@@ -72,9 +78,10 @@ vulnerable-book-shelf-ai
 │  │  └─ setupTests.js
 │  └─ tailwind.config.js
 ├─ llm
+│  ├─ .dockerignore
 │  ├─ app.py
-│  ├─ app1.py
-│  └─ app2.py
+│  ├─ Dockerfile
+│  └─ requirements.txt
 ├─ lol.txt
 ├─ prompt.txt
 └─ README.md

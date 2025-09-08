@@ -4,9 +4,12 @@ services:
   backend:
     build: ./backend
     container_name: bookshelf_backend
+    env_file:
+      - .env
     environment:
-      - DB_PATH=/data/database.db
-      - LLM_API=http://llm:5000/query
+      - DB_PATH=${DB_PATH}
+      - FLASK_APP=${FLASK_APP}
+      - FLASK_ENV=${FLASK_ENV}
     volumes:
       - ./data:/data
       - ./backend:/app
@@ -18,6 +21,10 @@ services:
   llm:
     build: ./llm
     container_name: bookshelf_llm
+    env_file:
+      - .env
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
     volumes:
       - ./llm:/app
     ports:
@@ -26,13 +33,17 @@ services:
   frontend:
     build: ./frontend
     container_name: bookshelf_frontend
+    env_file:
+      - .env
+    environment:
+      - CHOKIDAR_USEPOLLING=${CHOKIDAR_USEPOLLING}
+      - REACT_APP_BACKEND_URL=${REACT_APP_BACKEND_URL}
+      - REACT_APP_LLM_URL=${REACT_APP_LLM_URL}
     volumes:
       - ./frontend:/app
       - /app/node_modules
     ports:
       - "3000:3000"
-    environment:
-      - CHOKIDAR_USEPOLLING=true
     depends_on:
       - backend
 
