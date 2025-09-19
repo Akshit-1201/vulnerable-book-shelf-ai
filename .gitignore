@@ -13,7 +13,7 @@ frontend/node_modules/
 frontend/build/
 
 # Environment & secrets
-*.env
+# *.env
 
 # VSCode settings
 .vscode/
