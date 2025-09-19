@@ -34,8 +34,34 @@ Phase 1: Concept & Roadmap
         
     *   Demonstrates how attacker can extract or destroy data.s
 
+==================
+### Architecture Diagram
+```mermaid
+flowchart LR
+  subgraph FE["Frontend"]
+    A[(User - Queries)]
+  end
+
+  subgraph BE["Backend (Flask)"]
+    B1["API Layer - REST / Uploads"]
+    B2["Relational DB (SQLite)"]
+  end
+
+  subgraph LLM["LLM Service"]
+    C["LLM (local or external)"]
+  end
+
+  %% Connections
+  A --> |"REST"| B1
+  B1 --> B2
+  B1 --> |"prompt + context"| C
+  C --> |"inference / summary"| B1
+  B1 --> |"response"| A
 
 ```
+
+======================
+#### Project Structure:
 vulnerable-book-shelf-ai
 ├─ backend
 │  ├─ .dockerignore
