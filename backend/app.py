@@ -29,7 +29,8 @@ def get_db_schema() -> dict:
     tables = cur.fetchall()
     
     schema = {}
-    for (table,) in tables:
+    for row in tables:
+        table = row[0]
         # skip sqlite internal tables if any
         if table.startswith("sqlite_"):
             continue
@@ -78,13 +79,24 @@ def signup():
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        # Intentionally include role (default 'user') for version-2.
         cur.execute(
-            "INSERT INTO users (username, email, password, phone_number) VALUES (?,?,?,?)",
-            (data["username"], data["email"], data["password"], data["phone"]),
+            "INSERT INTO users (username, email, password, phone_number, role) VALUES (?,?,?,?,?)",
+            (data["username"], data["email"], data["password"], data["phone"], "user"),
         )
         conn.commit()
     except sqlite3.IntegrityError as e:
         return jsonify({"error": f"Integrity error: {e}"}), 400
+    except sqlite3.OperationalError as e:
+        # Fallback in case DB doesn't have role column (backwards compatibility)
+        try:
+            cur.execute(
+                "INSERT INTO users (username, email, password, phone_number) VALUES (?,?,?,?)",
+                (data["username"], data["email"], data["password"], data["phone"]),
+            )
+            conn.commit()
+        except Exception as e2:
+            return jsonify({"error": f"DB error: {e2}"}), 500
     finally:
         conn.close()
 
@@ -106,7 +118,9 @@ def login():
     conn.close()
 
     if user:
-        return jsonify({"message": "Login Successful"})
+        # return role (if present)
+        role = user["role"] if "role" in user.keys() else "user"
+        return jsonify({"message": "Login Successful", "role": role})
 
     return jsonify({"error": "Invalid Credentials"}), 401
 
@@ -350,6 +364,171 @@ def search():
         "answer": answer,
         "intent": "db_query"
     })
+
+# ==================== ADMIN (VULNERABLE: frontend-only gating) ====================
+
+@app.route("/books", methods=["GET"])
+def list_books():
+    """Public listing of books (used by admin panel + UI)."""
+    try:
+        rows = run_sql_select("SELECT id, title, author, genre FROM books;")
+        return jsonify({"books": rows})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/admin/add_book", methods=["POST"])
+def admin_add_book():
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    author = (data.get("author") or "").strip()
+    genre = (data.get("genre") or "").strip()
+    if not title or not author:
+        return jsonify({"error": "title & author required"}), 400
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO books (title, author, genre) VALUES (?,?,?)",
+            (title, author, genre)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Book added"}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/admin/edit_book/<int:book_id>", methods=["PUT"])
+def admin_edit_book(book_id):
+    data = request.get_json(silent=True) or {}
+    fields = []
+    vals = []
+    for k in ("title", "author", "genre"):
+        if k in data:
+            fields.append(f"{k} = ?")
+            vals.append(data[k])
+    if not fields:
+        return jsonify({"error": "No fields to update"}), 400
+    vals.append(book_id)
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(f"UPDATE books SET {', '.join(fields)} WHERE id = ?", vals)
+        conn.commit()
+        affected = cur.rowcount
+        conn.close()
+        return jsonify({"message": "Book updated", "affected": affected})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/admin/delete_book/<int:book_id>", methods=["DELETE"])
+def admin_delete_book(book_id):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM books WHERE id = ?", (book_id,))
+        conn.commit()
+        affected = cur.rowcount
+        conn.close()
+        return jsonify({"message": "Book deleted", "affected": affected})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/admin/users", methods=["GET"])
+def admin_users():
+    """
+    Intentionally returns all users (including plaintext passwords) for demo purposes.
+    WARNING: vulnerable endpoint — no auth or role enforcement.
+    """
+    try:
+        rows = run_sql_select("SELECT id, username, email, password, role FROM users;")
+        return jsonify({"users": rows})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ------------------- ADMIN: User management (VULNERABLE) -------------------
+
+@app.route("/admin/add_user", methods=["POST"])
+def admin_add_user():
+    """
+    Add a new user. Intentionally stores password in plaintext for the demo.
+    Expected JSON body: { "username": "...", "email": "...", "password": "...", "phone": "...", "role": "user"|"admin" }
+    """
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    email = (data.get("email") or "").strip()
+    password = (data.get("password") or "").strip()
+    phone = (data.get("phone") or "").strip()
+    role = (data.get("role") or "user").strip()
+
+    if not username or not email or not password:
+        return jsonify({"error": "username, email and password are required"}), 400
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO users (username, email, password, phone_number, role) VALUES (?,?,?,?,?)",
+            (username, email, password, phone, role)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "User added"}), 201
+    except sqlite3.IntegrityError as e:
+        return jsonify({"error": f"Integrity error: {e}"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/admin/edit_user/<int:user_id>", methods=["PUT"])
+def admin_edit_user(user_id):
+    """
+    Edit user fields (username, email, password, phone_number, role).
+    Body contains the fields to update.
+    """
+    data = request.get_json(silent=True) or {}
+    fields = []
+    vals = []
+    mapping = {
+        "username": "username",
+        "email": "email",
+        "password": "password",
+        "phone": "phone_number",
+        "role": "role"
+    }
+    for k, col in mapping.items():
+        if k in data:
+            fields.append(f"{col} = ?")
+            vals.append(data[k])
+    if not fields:
+        return jsonify({"error": "No fields to update"}), 400
+    vals.append(user_id)
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", vals)
+        conn.commit()
+        affected = cur.rowcount
+        conn.close()
+        return jsonify({"message": "User updated", "affected": affected})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/admin/delete_user/<int:user_id>", methods=["DELETE"])
+def admin_delete_user(user_id):
+    """
+    Delete a user by id.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.commit()
+        affected = cur.rowcount
+        conn.close()
+        return jsonify({"message": "User deleted", "affected": affected})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)

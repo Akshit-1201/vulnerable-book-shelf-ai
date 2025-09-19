@@ -1,3 +1,4 @@
+// frontend/src/components/Signup.js
 import React, { useState } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
@@ -14,7 +15,8 @@ export default function Signup({ onSignup }) {
     try {
       const res = await axios.post("http://127.0.0.1:8000/signup", form);
       alert(res.data.message || "Signup successful");
-      onSignup();
+      // new users are regular users
+      onSignup("user");
       navigate("/search");
     } catch (err) {
       alert("Signup failed: " + (err.response?.data?.error || err.message));
