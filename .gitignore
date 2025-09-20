@@ -3,11 +3,6 @@ venv-books-app/
 __pycache__/
 *.pyc
 
-<<<<<<< HEAD
-# backend
-
-=======
->>>>>>> version-3
 # Node
 frontend/node_modules/
 frontend/build/
