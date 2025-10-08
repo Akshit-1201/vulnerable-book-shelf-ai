@@ -1,4 +1,3 @@
-# backend/app.py
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import sqlite3
@@ -11,18 +10,19 @@ app = Flask(__name__)
 CORS(app)
 
 DB_PATH = os.getenv("DB_PATH", "../data/database.db")
-# Your local LLM service. Expected to accept {"prompt": "...", "mode": "sql"|"text"}.
 LLM_API = os.getenv("LLM_API", "http://127.0.0.1:5000/query")
+MCP_API = os.getenv('MCP_API', "http://127.0.0.1:8001")
 
 # ----------------------- DB Helpers -----------------------
-
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 def get_db_schema() -> dict:
-    """Extract current schema from SQLite database."""
+    """
+    Extract current schema from SQLite database.
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -31,7 +31,6 @@ def get_db_schema() -> dict:
     schema = {}
     for row in tables:
         table = row[0]
-        # skip sqlite internal tables if any
         if table.startswith("sqlite_"):
             continue
         cur.execute(f"PRAGMA table_info({table});")
@@ -68,7 +67,6 @@ def run_sql_modify(sql: str):
         conn.close()
 
 # ==================== AUTH ====================
-
 @app.route("/signup", methods=["POST"])
 def signup():
     data = request.json or {}
@@ -125,7 +123,6 @@ def login():
     return jsonify({"error": "Invalid Credentials"}), 401
 
 # ----------------------- LLM Helpers -----------------------
-
 GREET_RE = re.compile(r"\b(hi|hello|hey|hola|namaste|good (morning|afternoon|evening))\b", re.I)
 THANKS_RE = re.compile(r"\b(thanks|thank you|tysm)\b", re.I)
 BYE_RE = re.compile(r"\b(bye|goodbye|see ya|cya|see you)\b", re.I)
@@ -259,14 +256,29 @@ Write a concise, friendly answer. Use bullet points if helpful. Do not invent fi
     return llm_text(prompt)
 
 # ==================== SEARCH (Hybrid) ====================
-
 @app.route("/search", methods=["POST"])
 def search():
     data = request.get_json(silent=True) or {}
     query = (data.get("query") or "").strip()
+    user_id = data.get("user_id")
     
     if not query:
         return jsonify({"error": "Empty query"}), 400
+
+    # Try MCP RAG first
+    try:
+        rag_resp = requests.post(f"{MCP_API}/mcp/search", json={
+            "query": query, 
+            "user_id": user_id
+            }, timeout=20)
+        if rag_resp.ok:
+            rag_data = rag_resp.json()
+
+            # If MCP returned an answer or results, forward it to the frontend.
+            if rag_data.get("answer") or rag_data.get("results"):
+                return jsonify(rag_data)
+    except Exception:
+        pass
 
     schema = get_db_schema()
     schema_text = schema_as_text(schema)
@@ -366,15 +378,16 @@ def search():
     })
 
 # ==================== ADMIN (VULNERABLE: frontend-only gating) ====================
-
 @app.route("/books", methods=["GET"])
 def list_books():
     """Public listing of books (used by admin panel + UI)."""
     try:
-        rows = run_sql_select("SELECT id, title, author, genre FROM books;")
+        rows = run_sql_select("SELECT id, title, author, genre, COALESCE(status, '') AS status FROM books;")
         return jsonify({"books": rows})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "error": str(e)
+            }), 500
 
 @app.route("/admin/add_book", methods=["POST"])
 def admin_add_book():
@@ -383,7 +396,9 @@ def admin_add_book():
     author = (data.get("author") or "").strip()
     genre = (data.get("genre") or "").strip()
     if not title or not author:
-        return jsonify({"error": "title & author required"}), 400
+        return jsonify({
+            "error": "title & author required"
+            }), 400
 
     try:
         conn = get_db_connection()
@@ -528,6 +543,56 @@ def admin_delete_user(user_id):
         return jsonify({"message": "User deleted", "affected": affected})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# ==================== MCP / INGEST endpoints ====================
+@app.route("/ingest", methods=["POST"])
+def ingest():
+    '''
+    Receives multipart/form-data from frontend and proxies the upload to the MCP service.
+    Expected form fields: pdf (file), user_id, title, author, book_id (optional)
+    Returns whatever MCP returns. (Non-blocking behavior depends on MCP implementation.)
+    '''
+    # Validation
+    user_id = request.form.get("user_id")
+    title = request.form.get("title")
+    author = request.form.get("author")
+    book_id = request.form.get("book_id")
+    pdf = request.form.get("pdf")
+
+    if not user_id or not title or not author or not pdf:
+        return jsonify({
+            "error": "Missing Required Fields: user_id, title, author, pdf"
+        }), 400
+    
+    try:
+        files = {"pdf": (pdf.filename, pdf.stream, pdf.mimetype)}
+        data = {
+            "user_id": user_id,
+            "title": title,
+            "author": author
+        }
+
+        if book_id:
+            data["book_id"] = book_id
+        resp = requests.post(f"{MCP_API}/mcp/upload", files=files, data=data, timeout=300)
+        return (resp.content, resp.status_code, dict(resp.headers))
+    except Exception as e:
+        return jsonify({
+            "error": f"Failed to forward to MCP: {str(e)}"
+        }), 500
+    
+@app.route("/ingest/status/<upload_id>", methods=["GET"])
+def ingest_ststus(upload_id):
+    '''
+    Proxy to MCP Server so that Frontend can poll
+    '''
+    try:
+        resp = requests.get(f"{MCP_API}/mcp/status/{upload_id}", timeout=10)
+        return (resp.content, resp.status_code, dict(resp.headers))
+    except Exception as e:
+        return jsonify({
+            "error": f"Failed to contact MCP status: {str(e)}"
+        }), 500
 
 
 if __name__ == "__main__":

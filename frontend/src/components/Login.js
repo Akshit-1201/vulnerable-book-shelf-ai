@@ -1,4 +1,3 @@
-// frontend/src/components/Login.js
 import React, { useState } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
@@ -17,8 +16,9 @@ export default function Login({ onLogin }) {
         password,
       });
       const role = res.data.role || "user";
+      const user_id = res.data.user_id || null;
       alert(res.data.message || "Login successful");
-      onLogin(role);
+      onLogin({ role, user_id });
       navigate("/search");
     } catch (err) {
       const errorMsg = err.response?.data?.error || err.message;
