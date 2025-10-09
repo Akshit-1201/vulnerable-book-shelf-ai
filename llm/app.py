@@ -23,17 +23,13 @@ embedding_model = "gemini-embedding-001"
 def query():
     """Handles both SQL generation and natural text responses."""
     prompt = request.json.get("prompt", "")
-    mode = request.json.get("mode", "sql")  # default to sql mode
+    mode = request.json.get("mode", "sql")
 
-    # Run Gemini
     response = text_model.generate_content(prompt)
     text = response.text.strip()
-
-    # SQL mode → only return SQL snippet
+    
     if mode == "sql":
         return jsonify({"sql": text})
-
-    # Summary/answer mode → return natural text
     return jsonify({"text": text})
 
 @app.route("/embed", methods=["POST"])
