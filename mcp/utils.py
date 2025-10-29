@@ -6,7 +6,7 @@ from pdfminer.high_level import extract_text
 from tqdm import tqdm
 
 def ensure_dir(p):
-    os.makedirs(p, exists_ok=True)
+    os.makedirs(p, exist_ok=True)
 
 def extract_text_from_pdf(path: str) -> str:
     '''
@@ -14,31 +14,33 @@ def extract_text_from_pdf(path: str) -> str:
     '''
     return extract_text(path) or ""
 
-def chunk_text(text: str, chunk_size_chars: int = 1500, overlap_chars: int = 200):
+def chunk_text(text: str, chunk_size_chars: int = 1500, overlap_chars: int = 200, book_id: str = None):
     '''
     Naive text chunker based on characters. Returns list of dicts:
-    [{"id": "<uuid>", "text": "...", "start": n, "end": m}, ...]
+    [{"id": "<uuid>", "text": "...", "start": n, "end": m, "book_id": "..."}, ...]
     '''
     if not text:
         return []
     
     chunks = []
-    i=0
+    i = 0
     n = len(text)
     
-    while i<n:
-        end = min(i+chunk_size_chars, n)
-        chunk_text = text[i:end].strip()
+    while i < n:
+        end = min(i + chunk_size_chars, n)
+        chunk_txt = text[i:end].strip()
         
-        if chunk_text:
+        if chunk_txt:
             chunks.append({
                 "id": str(uuid.uuid4()),
-                "text": chunk_text,
+                "text": chunk_txt,
                 "start": i,
-                "end": end
+                "end": end,
+                "book_id": book_id
             })
-        # move by chunk_size - overlap
-        i = end - overlap_chars if end - overlap_chars > i else end  
+        # move by chunk_size - overlap (ensure progress)
+        next_i = end - overlap_chars
+        i = next_i if next_i > i else end
     
     return chunks
 

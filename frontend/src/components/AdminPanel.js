@@ -3,6 +3,18 @@ import React, { useState, useEffect, useRef } from "react";
 import axios from "axios";
 import { Link } from "react-router-dom";
 
+/**
+ * AdminPanel
+ * - Manage books (add / delete)
+ * - Manage users (add / delete / edit link)
+ * - Upload PDF for indexing (for admin users)
+ *
+ * Notes:
+ * - Do NOT set Content-Type manually when sending FormData (browser will set boundary)
+ * - Enforce admin role check based on localStorage role
+ * - Clear file input after upload using fileInputRef
+ */
+
 export default function AdminPanel() {
   const [tab, setTab] = useState("books"); // "books" or "users"
 
@@ -12,13 +24,14 @@ export default function AdminPanel() {
   const [bAuthor, setBAuthor] = useState("");
   const [bGenre, setBGenre] = useState("");
 
-  // Upload state (new)
+  // Upload state
   const [uploadFile, setUploadFile] = useState(null);
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadAuthor, setUploadAuthor] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState(null); // { upload_id, status, message }
   const uploadPollRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   // Users state
   const [users, setUsers] = useState([]);
@@ -30,34 +43,50 @@ export default function AdminPanel() {
 
   const [loading, setLoading] = useState(false);
 
+  // Base API - consider moving to env (REACT_APP_API_ROOT) for production
   const API_ROOT = "http://127.0.0.1:8000";
 
+  // Derived MCP base (if MCP is on 8001)
+  const MCP_BASE = API_ROOT.replace("8000", "8001");
+
   // Fetch books
-  const fetchBooks = async () => {
+  const fetchBooks = async (signal) => {
     try {
-      const res = await axios.get(`${API_ROOT}/books`);
+      const res = await axios.get(`${API_ROOT}/books`, { signal });
       setBooks(res.data.books || []);
     } catch (err) {
-      alert("Could not fetch books: " + (err.response?.data?.error || err.message));
+      // ignore abort errors
+      if (axios.isCancel(err) || err.name === "CanceledError") return;
+      const msg = err?.response?.data?.error || err.message;
+      alert("Could not fetch books: " + msg);
     }
   };
 
   // Fetch users
-  const fetchUsers = async () => {
+  const fetchUsers = async (signal) => {
     try {
-      const res = await axios.get(`${API_ROOT}/admin/users`);
+      const res = await axios.get(`${API_ROOT}/admin/users`, { signal });
       setUsers(res.data.users || []);
     } catch (err) {
-      alert("Could not fetch users: " + (err.response?.data?.error || err.message));
+      if (axios.isCancel(err) || err.name === "CanceledError") return;
+      const msg = err?.response?.data?.error || err.message;
+      alert("Could not fetch users: " + msg);
     }
   };
 
   useEffect(() => {
-    fetchBooks();
-    fetchUsers();
+    // Use AbortController to cancel requests on unmount
+    const controller = new AbortController();
+    fetchBooks(controller.signal);
+    fetchUsers(controller.signal);
+
     // cleanup on unmount
     return () => {
-      if (uploadPollRef.current) clearInterval(uploadPollRef.current);
+      controller.abort();
+      if (uploadPollRef.current) {
+        clearInterval(uploadPollRef.current);
+        uploadPollRef.current = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -65,18 +94,18 @@ export default function AdminPanel() {
   // BOOKS handlers
   const handleAddBook = async (e) => {
     e.preventDefault();
-    if (!bTitle || !bAuthor) {
+    if (!bTitle.trim() || !bAuthor.trim()) {
       alert("Title and Author required");
       return;
     }
     setLoading(true);
     try {
-      await axios.post(`${API_ROOT}/admin/add_book`, { title: bTitle, author: bAuthor, genre: bGenre });
+      await axios.post(`${API_ROOT}/admin/add_book`, { title: bTitle.trim(), author: bAuthor.trim(), genre: bGenre.trim() });
       alert("Book added");
       setBTitle(""); setBAuthor(""); setBGenre("");
       fetchBooks();
     } catch (err) {
-      alert("Add failed: " + (err.response?.data?.error || err.message));
+      alert("Add failed: " + (err?.response?.data?.error || err.message));
     } finally {
       setLoading(false);
     }
@@ -86,15 +115,17 @@ export default function AdminPanel() {
     if (!window.confirm("Delete this book?")) return;
     setLoading(true);
     try {
-      await axios.delete(`${API_ROOT}/admin/delete_book/${id}`);
+      // call MCP delete endpoint (MCP runs on port 8001 locally)
+      await axios.post(`${MCP_BASE}/mcp/delete_book`, { book_id: id });
       alert("Deleted");
       fetchBooks();
     } catch (err) {
-      alert("Delete failed: " + (err.response?.data?.error || err.message));
+      alert("Delete failed: " + (err?.response?.data?.error || err.message));
     } finally {
       setLoading(false);
     }
   };
+
 
   // Helper: try to query status endpoints (backend `/ingest/status` first, then MCP `/mcp/status`)
   const getStatusForUpload = async (upload_id) => {
@@ -103,9 +134,9 @@ export default function AdminPanel() {
       const res = await axios.get(`${API_ROOT}/ingest/status/${upload_id}`);
       return res.data;
     } catch (err) {
-      // try fallback to mcp
+      // fallback to MCP service directly
       try {
-        const res2 = await axios.get(`${API_ROOT.replace("8000", "8001")}/mcp/status/${upload_id}`);
+        const res2 = await axios.get(`${MCP_BASE}/mcp/status/${upload_id}`);
         return res2.data;
       } catch (err2) {
         return null;
@@ -115,34 +146,43 @@ export default function AdminPanel() {
 
   const startUploadPolling = (upload_id) => {
     setUploadStatus({ upload_id, status: "indexing", message: "Indexing started" });
-    // poll every 3s up to 2 minutes
+
+    // poll every 3s up to ~2 minutes (40 tries)
     let tries = 0;
     if (uploadPollRef.current) clearInterval(uploadPollRef.current);
+
     uploadPollRef.current = setInterval(async () => {
       tries++;
       const s = await getStatusForUpload(upload_id);
       if (s && s.status) {
-        setUploadStatus({ upload_id, status: s.status, message: s.message || "" });
-        if (s.status === "published" || s.status === "failed") {
+        // normalize some status names (MCP might return 'done'/'indexed' etc.)
+        let statusVal = s.status;
+        if (statusVal === "done") statusVal = "published";
+        if (statusVal === "indexed") statusVal = "indexed";
+
+        setUploadStatus(prev => ({ ...(prev || {}), upload_id, status: statusVal, message: s.error || s.message || "" }));
+
+        // stop polling on terminal states
+        if (["published", "failed", "error"].includes(statusVal)) {
           clearInterval(uploadPollRef.current);
           uploadPollRef.current = null;
           fetchBooks();
         }
       }
-      if (tries > 40) { // ~2 minutes
+      if (tries > 40) { // timeout ~2 minutes
         clearInterval(uploadPollRef.current);
         uploadPollRef.current = null;
-        setUploadStatus(prev => ({ ...prev, status: "timeout", message: "Indexing timed out" }));
+        setUploadStatus(prev => ({ ...(prev || {}), status: "timeout", message: "Indexing timed out" }));
       }
     }, 3000);
   };
 
-  // UPLOAD handlers (new)
+  // UPLOAD handlers
   const handleUploadPdf = async (e) => {
     e.preventDefault();
 
     // Enforce mandatory title & author for uploads
-    if (!uploadTitle || !uploadAuthor) {
+    if (!uploadTitle.trim() || !uploadAuthor.trim()) {
       alert("Title and Author are required for PDF uploads.");
       return;
     }
@@ -153,8 +193,9 @@ export default function AdminPanel() {
     }
 
     const user_id = localStorage.getItem("user_id");
-    if (!user_id) {
-      alert("No user id found. Make sure you're logged in as an admin.");
+    const role = localStorage.getItem("role");
+    if (!user_id || role !== "admin") {
+      alert("No user id found or you are not an admin. Make sure you're logged in as an admin.");
       return;
     }
 
@@ -163,36 +204,41 @@ export default function AdminPanel() {
     try {
       const form = new FormData();
       form.append("user_id", user_id);
-      form.append("pdf", uploadFile);
-      form.append("title", uploadTitle);
-      form.append("author", uploadAuthor);
-      // book_id optional - derive from title if provided (simple slug)
-      const bookId = (uploadTitle || "").trim().toLowerCase().replace(/\s+/g, "-");
+      // append file with filename explicitly
+      form.append("pdf", uploadFile, uploadFile.name);
+      form.append("title", uploadTitle.trim());
+      form.append("author", uploadAuthor.trim());
+      // optional book_id (simple slug)
+      const bookId = uploadTitle.trim().toLowerCase().replace(/\s+/g, "-");
       form.append("book_id", bookId);
 
-      const res = await axios.post(`${API_ROOT}/ingest`, form, {
-        headers: { "Content-Type": "multipart/form-data" },
-        timeout: 120000
-      });
+      // IMPORTANT: do NOT set Content-Type manually. Let browser set boundary.
+      const res = await axios.post(`${API_ROOT}/ingest`, form, { timeout: 120000 });
 
-      // Expecting { upload_id, book_id, status }
       const data = res.data || {};
-      alert("Upload response: " + JSON.stringify(data));
+      // show feedback
+      if (data.error) {
+        alert("Upload failed: " + data.error);
+      } else {
+        alert("Upload response: " + JSON.stringify(data));
+      }
+
       if (data.upload_id) {
-        // Start polling status endpoint
+        // start polling for status
         startUploadPolling(data.upload_id);
       } else {
-        // If backend returns nothing, attempt to refresh books anyway
+        // no upload id returned -> refresh books to be safe
         fetchBooks();
       }
 
-      // reset upload form inputs (keep status display)
+      // clear form
       setUploadFile(null);
       setUploadTitle("");
       setUploadAuthor("");
-      // if input file element exists, clearing state is enough
+      // clear native file input
+      if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (err) {
-      alert("Upload failed: " + (err.response?.data?.error || err.message));
+      alert("Upload failed: " + (err?.response?.data?.error || err.message));
     } finally {
       setUploading(false);
     }
@@ -201,24 +247,24 @@ export default function AdminPanel() {
   // USERS handlers
   const handleAddUser = async (e) => {
     e.preventDefault();
-    if (!uName || !uEmail || !uPassword) {
+    if (!uName.trim() || !uEmail.trim() || !uPassword.trim()) {
       alert("Username, Email and Password are required");
       return;
     }
     setLoading(true);
     try {
       await axios.post(`${API_ROOT}/admin/add_user`, {
-        username: uName,
-        email: uEmail,
+        username: uName.trim(),
+        email: uEmail.trim(),
         password: uPassword,
-        phone: uPhone,
+        phone: uPhone.trim(),
         role: uRole
       });
       alert("User added");
       setUName(""); setUEmail(""); setUPassword(""); setUPhone(""); setURole("user");
       fetchUsers();
     } catch (err) {
-      alert("Add user failed: " + (err.response?.data?.error || err.message));
+      alert("Add user failed: " + (err?.response?.data?.error || err.message));
     } finally {
       setLoading(false);
     }
@@ -232,7 +278,7 @@ export default function AdminPanel() {
       alert("User deleted");
       fetchUsers();
     } catch (err) {
-      alert("Delete failed: " + (err.response?.data?.error || err.message));
+      alert("Delete failed: " + (err?.response?.data?.error || err.message));
     } finally {
       setLoading(false);
     }
@@ -279,7 +325,7 @@ export default function AdminPanel() {
               </div>
             </form>
 
-            {/* UPLOAD PDF area (new) */}
+            {/* UPLOAD PDF area */}
             <div className="mb-6 border-t pt-6">
               <h4 className="font-semibold mb-3">Upload Book PDF (admin-only)</h4>
               <form onSubmit={handleUploadPdf} className="space-y-3">
@@ -301,9 +347,10 @@ export default function AdminPanel() {
                 </div>
                 <div>
                   <input
+                    ref={fileInputRef}
                     type="file"
                     accept="application/pdf"
-                    onChange={(e) => setUploadFile(e.target.files[0])}
+                    onChange={(e) => setUploadFile(e.target.files && e.target.files[0])}
                   />
                 </div>
                 <div>
@@ -324,7 +371,7 @@ export default function AdminPanel() {
                     <strong>Status:</strong>{" "}
                     <span className={
                       uploadStatus.status === "published" ? "text-green-600" :
-                      uploadStatus.status === "failed" ? "text-red-600" : "text-yellow-600"
+                      uploadStatus.status === "failed" || uploadStatus.status === "error" ? "text-red-600" : "text-yellow-600"
                     }>
                       {uploadStatus.status}
                     </span>
