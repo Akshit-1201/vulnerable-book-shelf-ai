@@ -1,4 +1,3 @@
-# mcp/app.py
 import os
 import time
 import uuid

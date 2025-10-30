@@ -89,43 +89,110 @@ export default function Search() {
         return;
       }
 
-      // LIST intent: call MCP list_books
-      if (isListIntent(cleaned)) {
-        const res = await axios.get(`${MCP_BASE}/mcp/list_books`);
-        const books = res.data?.books || res.data || [];
-        if (!Array.isArray(books)) {
-          setAnswer("No books found (unexpected response shape).");
-        } else if (books.length === 0) {
-          setAnswer("No books available in the library.");
-        } else {
-          const lines = books.map(b => `**${b.title || b.name || "Untitled"}** by ${b.author || "Unknown"} (${b.vector_count || b.chunk_count || 0} chunks)`);
-          setAnswer("Here are all the books in your database:\n\n" + lines.join("\n\n"));
-        }
+      const lower = cleaned.toLowerCase();
+
+      const isDelete = /\b(delete|remove|erase)\b/.test(lower) && /\b(book|books|entry|record)\b/.test(lower);
+
+          if (isDelete) {
+      // try to extract candidate title by removing common verbs and phrases
+      let titleCandidate = cleaned
+        // remove leading verbs
+        .replace(/\b(delete|remove|erase|please|kindly)\b/ig, "")
+        // remove "from your database" / "from the database" etc.
+        .replace(/\b(from (your |the )?database|from db|from library)\b/ig, "")
+        // remove the word "book" (leave title)
+        .replace(/\b(book|books|entry|record)\b/ig, "")
+        .trim();
+
+      // fallback: if nothing left, fallback to whole cleaned string
+      if (!titleCandidate) titleCandidate = cleaned;
+
+      // Ask MCP for list of books and try to match
+      const listRes = await axios.get(`${MCP_BASE}/mcp/list_books`);
+      const mbooks = listRes.data?.books || [];
+
+      // Robust matching: exact lower or substring match
+      const norm = (s) => (s || "").trim().toLowerCase();
+      const cand = norm(titleCandidate);
+
+      // find exact or substring match in title OR upload_id
+      let match = mbooks.find(b => norm(b.title) === cand || norm(b.upload_id) === cand);
+      if (!match) {
+        match = mbooks.find(b => norm(b.title).includes(cand) || cand.includes(norm(b.title)));
+      }
+      if (!match) {
+        // try matching by author if title extraction failed
+        match = mbooks.find(b => norm(b.author).includes(cand) || cand.includes(norm(b.author)));
+      }
+
+      if (!match) {
+        // no match found -> show helpful message
+        setAnswer(`I could not find a book matching "${titleCandidate}" in the MCP registry. Please check the book title and try using the Admin panel (Admin → Books) to delete manually.`);
         setLoading(false);
         return;
       }
 
-      // Otherwise: RAG search
-      // Accept shaped response and robustly parse it
-      const payload = { query: cleaned, top_k: 6 };
-      const res = await axios.post(`${MCP_BASE}/mcp/search`, payload, { timeout: 120000 });
-
-      // parse response for main answer + optional context
-      const { text, snippets, sources: srcs } = parseMcpAnswer(res.data || {});
-      // fallback: sometimes answer is available at res.data.answer.answer or res.data.payload
-      let finalText = text;
-      if (!finalText) {
-        // try some nested common shapes
-        if (res.data?.payload?.answer) finalText = res.data.payload.answer;
-        else if (res.data?.response?.answer) finalText = res.data.response.answer;
-        else finalText = JSON.stringify(res.data).slice(0, 400);
+      // Confirm with the user (optional UI prompt)
+      const confirmMsg = `Delete "${match.title}" by ${match.author} (book_id=${match.book_id || "unknown"})?`;
+      if (!window.confirm(confirmMsg)) {
+        setAnswer("Deletion cancelled by user.");
+        setLoading(false);
+        return;
       }
 
-      setAnswer(finalText);
-      setContextSnippets(snippets || []);
-      setSources(srcs || []);
+      // Call MCP delete endpoint with the MCP book_id (the shape MCP expects)
+      try {
+        const delRes = await axios.post(`${MCP_BASE}/mcp/delete_book`, { book_id: match.book_id });
+        // delRes might include {status: "deleted", remaining_vectors: N} or similar
+        setAnswer(`Deleted "${match.title}". MCP response: ${JSON.stringify(delRes.data)}`);
+        // optionally refresh the UI (books list) by calling list_books or /books on backend
+        // (The AdminPanel component already fetches books when you switch tabs; you could also signal a refresh event)
+      } catch (err) {
+        const msg = err?.response?.data?.error || err?.message || String(err);
+        setAnswer(`Delete request failed: ${msg}`);
+      }
+
+      setLoading(false);
+      return;
+    }
+
+    // ----------------------
+    // 2) LIST intent (existing behavior)
+    // ----------------------
+    if (isListIntent(cleaned)) {
+      const res = await axios.get(`${MCP_BASE}/mcp/list_books`);
+      const books = res.data?.books || res.data || [];
+      if (!Array.isArray(books)) {
+        setAnswer("No books found (unexpected response shape).");
+      } else if (books.length === 0) {
+        setAnswer("No books available in the library.");
+      } else {
+        const lines = books.map(b => `**${b.title || b.name || "Untitled"}** by ${b.author || "Unknown"} (${b.vector_count || b.chunk_count || 0} chunks)`);
+        setAnswer("Here are all the books in your database:\n\n" + lines.join("\n\n"));
+      }
+      setLoading(false);
+      return;
+    }
+
+    // ----------------------
+    // 3) Default: RAG search (unchanged)
+    // ----------------------
+    const payload = { query: cleaned, top_k: 6, user_id: localStorage.getItem("user_id") };
+    const res = await axios.post(`${MCP_BASE}/mcp/search`, payload, { timeout: 120000 });
+    const { text, snippets, sources: srcs } = parseMcpAnswer(res.data || {});
+
+    let finalText = text;
+    if (!finalText) {
+      if (res.data?.payload?.answer) finalText = res.data.payload.answer;
+      else if (res.data?.response?.answer) finalText = res.data.response.answer;
+      else finalText = JSON.stringify(res.data).slice(0, 400);
+    }
+
+    setAnswer(finalText);
+    setContextSnippets(snippets || []);
+    setSources(srcs || []);
+
     } catch (err) {
-      // show helpful diagnostics but avoid huge raw dumps
       const msg = err?.response?.data?.error || err?.response?.data || err.message || String(err);
       alert("Search failed: " + (typeof msg === "string" ? msg : JSON.stringify(msg).slice(0, 300)));
     } finally {
@@ -171,32 +238,6 @@ export default function Search() {
           <div className="prose text-lg text-gray-800">
             <ReactMarkdown>{answer}</ReactMarkdown>
           </div>
-
-          {/* Context / supporting snippets */}
-          {contextSnippets && contextSnippets.length > 0 && (
-            <div className="mt-4">
-              <h5 className="font-medium mb-2">Supporting snippets</h5>
-              <ul className="list-disc list-inside text-sm text-gray-700">
-                {contextSnippets.map((s, i) => (
-                  <li key={i} className="mb-1">
-                    <ReactMarkdown>{s}</ReactMarkdown>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {/* Sources */}
-          {sources && sources.length > 0 && (
-            <div className="mt-4 text-sm text-gray-600">
-              <strong>Sources:</strong>
-              <ul className="list-inside list-disc">
-                {sources.map((s, i) => (
-                  <li key={i} className="truncate max-w-full">{s}</li>
-                ))}
-              </ul>
-            </div>
-          )}
         </div>
       )}
     </div>

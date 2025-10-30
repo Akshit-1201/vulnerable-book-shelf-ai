@@ -112,20 +112,57 @@ export default function AdminPanel() {
   };
 
   const handleDeleteBook = async (id) => {
-    if (!window.confirm("Delete this book?")) return;
+    //Find the book object from local books state by numeric id
+    const bookObj = books.find(b => b.id === id);
+    if (!bookObj) {
+      alert("Book not found in UI state.");
+      return;
+    }
+
+    if (!window.confirm(`Delete this book: "${bookObj.title}" by ${bookObj.author}?`)) return;
+
     setLoading(true);
+
     try {
-      // call MCP delete endpoint (MCP runs on port 8001 locally)
-      await axios.post(`${MCP_BASE}/mcp/delete_book`, { book_id: id });
-      alert("Deleted");
-      fetchBooks();
+      // First: ask MCP for its list of books to map to MCP book_id
+      const mcpRes = await axios.get(`${MCP_BASE}/mcp/list_books`);
+      const mcpBooks = mcpRes.data?.books || [];
+
+      // Try to find a matching MCP book using title+author (best-effort match)
+      const match = mcpBooks.find(mb => {
+        const t1 = (mb.title || "").trim().toLowerCase();
+        const a1 = (mb.author || "").trim().toLowerCase();
+        const t2 = (bookObj.title || "").trim().toLowerCase();
+        const a2 = (bookObj.author || "").trim().toLowerCase();
+
+        return t1 === t2 && a1 === a2;
+      });
+
+      if (!match) {
+        const proceed = window.confirm(
+          "This book was not found in the MCP registry (maybe it wasn't uploaded/indexed). " +
+        "Do you still want to delete the book record from the backend database?"
+        );
+
+        if (!proceed) {
+          setLoading(false);
+          return;
+        }
+
+        await axios.delete(`${API_ROOT}/admin/delete_book/${id}`);
+        alert("Book record deleted from backend. (not in MCP)");
+        fetchBooks();
+        setLoading(false);
+        return;
+      }
+
     } catch (err) {
-      alert("Delete failed: " + (err?.response?.data?.error || err.message));
+      const msg = err?.response?.data?.error || err?.message || String(err);
+      alert("Delete failed: " + msg);
     } finally {
       setLoading(false);
     }
   };
-
 
   // Helper: try to query status endpoints (backend `/ingest/status` first, then MCP `/mcp/status`)
   const getStatusForUpload = async (upload_id) => {

@@ -1,4 +1,4 @@
-# backend/app.py
+# backend/app.py (logging cleaned: minimal, readable logs; no logic changes)
 import os
 import re
 import json
@@ -10,7 +10,8 @@ from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 
 # -------------------- Config & Logging --------------------
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s")
+# Keep logs concise and at INFO level for normal operation.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("backend")
 
 app = Flask(__name__)
@@ -101,19 +102,14 @@ def run_sql_modify(sql: str, params: Optional[tuple] = None) -> int:
     finally:
         conn.close()
 
-# -------------------- Request logging --------------------
+# -------------------- Request logging (minimal) --------------------
 @app.before_request
-def log_request():
+def log_request_minimal():
+    # Log concise request line only; avoid headers or full bodies to keep logs clean.
     try:
-        logger.debug("Incoming request: %s %s from %s", request.method, request.path, request.remote_addr)
-        logger.debug("Headers: %s", dict(request.headers))
-        if request.is_json:
-            logger.debug("JSON Body: %s", request.get_json(silent=True))
-        else:
-            # show form keys if multipart/form-data (for uploads)
-            logger.debug("Form keys: %s", list(request.form.keys()))
-    except Exception as e:
-        logger.exception("Error logging request: %s", e)
+        logger.info("Request: %s %s from %s", request.method, request.path, request.remote_addr)
+    except Exception:
+        logger.exception("Error while logging request")
 
 # -------------------- Health & Root --------------------
 @app.route("/", methods=["GET"])
@@ -184,6 +180,7 @@ def signup():
     finally:
         conn.close()
 
+    logger.info("New user created: %s", data.get("email"))
     return jsonify({"message": "User Created"}), 201
 
 @app.route("/login", methods=["POST"])
@@ -203,12 +200,14 @@ def login():
 
     if user:
         role = user["role"] if "role" in user.keys() else "user"
+        logger.info("User login: %s (role=%s)", email, role)
         return jsonify({
             "message": "Login Successful",
             "role": role,
             "user_id": user["id"],
             "username": user["username"]
         })
+    logger.info("Failed login attempt: %s", email)
     return jsonify({"error": "Invalid Credentials"}), 401
 
 # ----------------------- LLM Helpers (unchanged logic) -----------------------
@@ -453,6 +452,7 @@ def admin_add_book():
         )
         conn.commit()
         conn.close()
+        logger.info("Added book: %s by %s", title, author)
         return jsonify({"message": "Book added"}), 201
     except Exception as e:
         logger.exception("Error adding book")
@@ -477,6 +477,7 @@ def admin_edit_book(book_id):
         conn.commit()
         affected = cur.rowcount
         conn.close()
+        logger.info("Edited book id=%s affected=%s", book_id, affected)
         return jsonify({"message": "Book updated", "affected": affected})
     except Exception as e:
         logger.exception("Error editing book")
@@ -491,6 +492,7 @@ def admin_delete_book(book_id):
         conn.commit()
         affected = cur.rowcount
         conn.close()
+        logger.info("Deleted book id=%s affected=%s", book_id, affected)
         return jsonify({"message": "Book deleted", "affected": affected})
     except Exception as e:
         logger.exception("Error deleting book")
@@ -527,6 +529,7 @@ def admin_add_user():
         )
         conn.commit()
         conn.close()
+        logger.info("Added user: %s (role=%s)", username, role)
         return jsonify({"message": "User added"}), 201
     except sqlite3.IntegrityError as e:
         logger.exception("Integrity error adding user")
@@ -561,6 +564,7 @@ def admin_edit_user(user_id):
         conn.commit()
         affected = cur.rowcount
         conn.close()
+        logger.info("Edited user id=%s affected=%s", user_id, affected)
         return jsonify({"message": "User updated", "affected": affected})
     except Exception as e:
         logger.exception("Error editing user")
@@ -575,6 +579,7 @@ def admin_delete_user(user_id):
         conn.commit()
         affected = cur.rowcount
         conn.close()
+        logger.info("Deleted user id=%s affected=%s", user_id, affected)
         return jsonify({"message": "User deleted", "affected": affected})
     except Exception as e:
         logger.exception("Error deleting user")
@@ -611,6 +616,7 @@ def ingest():
 
         resp = requests.post(f"{MCP_API}/mcp/upload", files=files, data=data, timeout=300)
         headers = filter_resp_headers(resp.headers)
+        logger.info("Forwarded ingest upload for user_id=%s title=%s (status=%s)", user_id, title, resp.status_code)
         return (resp.content, resp.status_code, headers)
     except Exception:
         logger.exception("Failed to forward to MCP")
@@ -632,4 +638,5 @@ def ingest_status(upload_id):
 # -------------------- Run --------------------
 if __name__ == "__main__":
     logger.info("Starting backend on 0.0.0.0:%s", BACKEND_PORT)
-    app.run(host="0.0.0.0", port=BACKEND_PORT, debug=True)
+    # Disabled debug flag to avoid verbose Flask debug logs in normal runs
+    app.run(host="0.0.0.0", port=BACKEND_PORT, debug=False)
