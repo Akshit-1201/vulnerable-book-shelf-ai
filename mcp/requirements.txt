@@ -1,0 +1,8 @@
+flask
+flask-cors
+python-dotenv
+requests
+faiss-cpu
+pdfminer.six
+tqdm
+tinydb

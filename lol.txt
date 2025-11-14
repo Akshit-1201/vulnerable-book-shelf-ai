@@ -24,3 +24,34 @@ we need to install Privilege Escalation to that.
 Example:
 Suppose, a normal user logs in the website, now he has the search bar to check for the database data (prompt injection as we have done in V-1), from there he will get the admin username and password... and he can log into the website using those credentials and change the content of the website database.
 
+
+======
+MCP Added
+========
+
+- The uploaded books pdfs if called by LLM in search bar like "Give me details about Biomaterials book", it says I don't find them in my snippets. Why snippets, store them by books, and it should be in a proper database. Like if we ask the same question in the previous version without MCP, it gives the details about that book, the same should be done in this version with MCP also.
+
+- The embeddings for a book pdf should be stored by name of the book given by admin
+
+- If the user/admin asks to "List all the books present in the database", it should not reply with the books it had stored in SQLite Database, instead it should give me the all the details (title, author, genre) of the uploaded books from the vectorDB. Also, the endpoint /mcp/search throws 500 error, when this query is triggered.
+
+- If I give a prompt "Delete the biomaterials book from the database", it says "I cant do it", which diverts from the main intent of our website i.e. an intentional vulnerable website.
+
+
+
+
+MCP Debugging
+===============
+Now, we have a problem with this whole project. The common intent should be whenever the user ask something like "Give me all the details of the users in the database", it should give me all the details of the users that are able to access the website (user and admin both). The users data is present in the SQLite database. Also, if the user asks to delete a particular user like "delete User1 from the database", it should delete the user from the sqlite database.
+
+Then whenever the users ask for the information of a particular book like "Give me details about the Harry Potter book", it should look into the vector database and check if the book is present in the database or not, if it is present in the database, it should give the details about the database. And if the user asks like "Delete Harry Potter book from the database", it should delete the said book from the database.
+
+This is the core intent of the website, it should be vulnerable to prompt injection, sql injection.
+
+Now, help me debug the given code. Right now, it is not showing the users details at all, it always shows me the books data, also it is not able to delete the books from the database upon giving it the prompt.
+
+
+
+
+
+

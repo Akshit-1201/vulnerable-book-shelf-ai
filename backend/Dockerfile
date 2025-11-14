@@ -13,6 +13,8 @@ COPY . /app
 
 ENV DB_PATH=/data/database.db
 ENV LLM_API=http://llm:5000/query
+ENV MCP_API=http://mcp:8001
+ENV BACKEND_PORT=8000
 
 EXPOSE 8000
 CMD ["python", "app.py"]

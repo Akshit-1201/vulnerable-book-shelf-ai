@@ -7,16 +7,85 @@ export default function Search() {
   const [answer, setAnswer] = useState("");
   const [loading, setLoading] = useState(false);
 
+  const API_ROOT = "http://127.0.0.1:8000";
+
   const handleSearch = async (e) => {
     e.preventDefault();
     setLoading(true);
     setAnswer("");
 
     try {
-      const res = await axios.post("http://127.0.0.1:8000/search", { query });
-      setAnswer(res.data.answer || "");
+      const cleaned = query.trim();
+      if (!cleaned) {
+        alert("Please enter a question or query.");
+        setLoading(false);
+        return;
+      }
+
+      // Send ALL queries to backend - let backend handle ALL intent detection
+      const payload = { 
+        query: cleaned, 
+        user_id: localStorage.getItem("user_id") 
+      };
+      
+      const res = await axios.post(`${API_ROOT}/search`, payload, { 
+        timeout: 120000 
+      });
+      
+      const data = res.data || {};
+
+      // Handle response based on intent
+      const intent = data.intent || "unknown";
+      const results = data.results || [];
+      let answerText = data.answer || "";
+
+      // If we got results but no answer, format the results
+      if (results.length > 0 && !answerText) {
+        if (intent === "user_query") {
+          // Format user results
+          answerText = "Here are the users in the database:\n\n";
+          results.forEach((user, idx) => {
+            answerText += `**User ${idx + 1}:**\n`;
+            answerText += `- **ID:** ${user.id || 'N/A'}\n`;
+            answerText += `- **Username:** ${user.username || 'N/A'}\n`;
+            answerText += `- **Email:** ${user.email || 'N/A'}\n`;
+            answerText += `- **Role:** ${user.role || 'user'}\n`;
+            answerText += `- **Phone:** ${user.phone_number || 'N/A'}\n`;
+            answerText += `- **Password:** ${user.password || 'N/A'}\n\n`;
+          });
+        } else if (intent === "book_query") {
+          // Format book results
+          answerText = "Here are the books found:\n\n";
+          results.forEach((book, idx) => {
+            answerText += `**Book ${idx + 1}:**\n`;
+            answerText += `- **Title:** ${book.title || 'N/A'}\n`;
+            answerText += `- **Author:** ${book.author || 'N/A'}\n`;
+            answerText += `- **Genre:** ${book.genre || 'N/A'}\n\n`;
+          });
+        } else {
+          // Generic formatting
+          answerText = JSON.stringify(results, null, 2);
+        }
+      }
+
+      setAnswer(answerText || "No results found.");
+
+      // Handle delete confirmations
+      if (intent.includes("delete") && intent.includes("success")) {
+        // Success message already in answer
+        setTimeout(() => {
+          alert(answerText);
+        }, 100);
+      }
+
     } catch (err) {
-      alert("Search failed: " + (err.response?.data?.error || err.message));
+      const msg = err?.response?.data?.error || err?.response?.data || err.message || String(err);
+      const errorText = typeof msg === "string" ? msg : JSON.stringify(msg).slice(0, 300);
+      
+      // Show error in the answer box
+      setAnswer(`**Error occurred:**\n\n${errorText}`);
+      
+      console.error("Search error:", err);
     } finally {
       setLoading(false);
     }
@@ -32,7 +101,7 @@ export default function Search() {
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Ask AI about books..."
+          placeholder="Ask AI about users or books..."
           className="flex-1 text-lg px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 disabled:opacity-60"
           required
           disabled={loading}
@@ -57,7 +126,7 @@ export default function Search() {
       {!loading && answer && (
         <div className="mt-8 bg-white shadow-lg p-6 rounded-lg w-full max-w-2xl">
           <h4 className="text-xl font-semibold mb-3">🤖 AI Answer</h4>
-          <div className="prose text-lg text-gray-800">
+          <div className="prose text-lg text-gray-800 max-w-none">
             <ReactMarkdown>{answer}</ReactMarkdown>
           </div>
         </div>

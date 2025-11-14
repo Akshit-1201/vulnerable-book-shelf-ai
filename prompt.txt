@@ -11,3 +11,5 @@ The Database consists of 2 tables, "users" and "books"... The "users" table cons
 Ensure the architecture has UI + API + local LLM + DB all done using containers and docker compose.
 
 I need you to first provide a plan, architecture, road map and then develop required code to make the application fully functional for demos.
+
+

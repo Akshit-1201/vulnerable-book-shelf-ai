@@ -1,4 +1,3 @@
-// frontend/src/components/Login.js
 import React, { useState } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
@@ -7,22 +6,49 @@ export default function Login({ onLogin }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
   const handleLogin = async (e) => {
     e.preventDefault();
+    setLoading(true);
+
     try {
       const res = await axios.post("http://127.0.0.1:8000/login", {
         email,
         password,
       });
-      const role = res.data.role || "user";
-      alert(res.data.message || "Login successful");
-      onLogin(role);
+
+      const data = res.data || {};
+      const role = data.role || "user";
+      const user_id = data.user_id ?? null;
+      const username = data.username ?? "";
+
+      // Persist minimal infor for admin UI (demo-only approach)
+      if(user_id) {
+        localStorage.setItem("user_id", String(user_id));
+      }
+
+      if (role) {
+        localStorage.setItem("role", role);
+      }
+
+      if (username) {
+        localStorage.setItem("username", username);
+      }
+
+      // Inform parent (if provided) and navigate
+      if (typeof onLogin === "function") {
+        onLogin({ role, user_id, username });
+      }
+
+      alert(data.message || "Login successful");
       navigate("/search");
     } catch (err) {
       const errorMsg = err.response?.data?.error || err.message;
       alert("Login failed: " + errorMsg);
+    } finally {
+      setLoading(false);
     }
   };
 

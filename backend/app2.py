@@ -1,3 +1,4 @@
+# backend/app.py (FIXED: proper user vs book intent detection)
 import os
 import re
 import json
@@ -200,12 +201,11 @@ def detect_intent(query: str) -> dict:
     Enhanced intent detection that distinguishes between:
     - user queries (SQLite)
     - book queries (MCP/Vector DB)
-    - list all books (complete registry)
     - delete operations
     - chitchat
     
     Returns: {
-        "intent": "user_query" | "book_query" | "list_all_books" | "delete_user" | "delete_book" | "chitchat",
+        "intent": "user_query" | "book_query" | "delete_user" | "delete_book" | "chitchat",
         "target": <extracted target if applicable>
     }
     """
@@ -219,19 +219,6 @@ def detect_intent(query: str) -> dict:
     
     # Delete detection
     is_delete = any(word in ql for word in ["delete", "remove", "drop", "erase"])
-    
-    # List ALL detection - check for "all" + "book" combinations
-    has_all = any(word in ql for word in ["all", "every", "entire", "complete", "whole"])
-    has_list_verb = any(word in ql for word in ["list", "show", "display", "give", "get", "fetch", "find"])
-    has_book = any(word in ql for word in ["book", "books"])
-    
-    # If query asks for "all books" or "list all books" or similar
-    if has_all and has_book and has_list_verb:
-        return {"intent": "list_all_books"}
-    
-    # Alternative patterns: "what books are", "books present", "books in database"
-    if has_book and any(phrase in ql for phrase in ["present in", "in database", "in the database", "are in", "are there"]):
-        return {"intent": "list_all_books"}
     
     # USER-related keywords (strong indicators)
     USER_KEYWORDS = [
@@ -380,56 +367,6 @@ def search():
             "answer": answer,
             "intent": "chitchat"
         })
-
-    # ==================== LIST ALL BOOKS ====================
-    if intent == "list_all_books":
-        # Get all books from MCP registry
-        try:
-            mcp_resp = requests.get(f"{MCP_API}/mcp/list_books", timeout=10)
-            if mcp_resp.ok:
-                books = mcp_resp.json().get("books", [])
-                
-                if len(books) == 0:
-                    return jsonify({
-                        "results": [],
-                        "generated_sql": "",
-                        "answer": "No books are currently uploaded to the database.",
-                        "intent": "list_all_books"
-                    })
-                
-                # Format book list for display
-                answer = f"Here are all {len(books)} books in the database:\n\n"
-                for idx, book in enumerate(books, 1):
-                    answer += f"**{idx}. {book.get('title', 'Untitled')}**\n"
-                    answer += f"   - Author: {book.get('author', 'Unknown')}\n"
-                    if book.get('genre'):
-                        answer += f"   - Genre: {book.get('genre')}\n"
-                    answer += f"   - Chunks indexed: {book.get('vector_count', 0)}\n"
-                    if book.get('filename'):
-                        answer += f"   - Filename: {book.get('filename')}\n"
-                    answer += "\n"
-                
-                return jsonify({
-                    "results": books,
-                    "generated_sql": "",
-                    "answer": answer,
-                    "intent": "list_all_books"
-                })
-            else:
-                return jsonify({
-                    "results": [],
-                    "generated_sql": "",
-                    "answer": "Failed to fetch books from the database.",
-                    "intent": "list_all_books_error"
-                }), 500
-        except Exception as e:
-            logger.exception("Error fetching all books from MCP")
-            return jsonify({
-                "results": [],
-                "generated_sql": "",
-                "answer": f"Error fetching books: {str(e)}",
-                "intent": "list_all_books_error"
-            }), 500
 
     # ==================== DELETE USER ====================
     if intent == "delete_user":
@@ -788,9 +725,15 @@ def admin_delete_user(user_id):
 # ==================== MCP / INGEST ====================
 @app.route("/ingest", methods=["POST"])
 def ingest():
+    """
+    Receives multipart/form-data from frontend and proxies the upload to the MCP service.
+    Expected form fields: pdf (file), user_id, title, author, genre, book_id (optional)
+    Returns whatever MCP returns.
+    """
     user_id = request.form.get("user_id")
     title = request.form.get("title")
     author = request.form.get("author")
+    genre = request.form.get("genre")  # NEW: Added genre
     book_id = request.form.get("book_id")
     pdf = request.files.get("pdf")
 
@@ -798,6 +741,7 @@ def ingest():
         return jsonify({"error": "Missing Required Fields: user_id, title, author, pdf"}), 400
 
     try:
+        # Ensure the file stream is at start
         try:
             pdf.stream.seek(0)
         except Exception:
@@ -805,12 +749,18 @@ def ingest():
 
         files = {"pdf": (pdf.filename, pdf.stream, pdf.mimetype)}
         data = {"user_id": user_id, "title": title, "author": author}
+        
+        # Add genre if provided
+        if genre:
+            data["genre"] = genre
+            
         if book_id:
             data["book_id"] = book_id
 
         resp = requests.post(f"{MCP_API}/mcp/upload", files=files, data=data, timeout=300)
         headers = filter_resp_headers(resp.headers)
-        logger.info("Forwarded ingest upload for user_id=%s title=%s (status=%s)", user_id, title, resp.status_code)
+        logger.info("Forwarded ingest upload for user_id=%s title=%s genre=%s (status=%s)", 
+                   user_id, title, genre or "N/A", resp.status_code)
         return (resp.content, resp.status_code, headers)
     except Exception:
         logger.exception("Failed to forward to MCP")
