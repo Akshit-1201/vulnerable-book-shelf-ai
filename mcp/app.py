@@ -330,7 +330,7 @@ def add_vectors_to_index(vec_ids: List[str], vectors: List[List[float]], metadat
         print("[mcp] Warning: failed to write FAISS index to disk:", e)
 
 # ----------------- Background processing -----------------
-def process_upload(upload_id, file_path, title, author, user_id, book_id=None):
+def process_upload(upload_id, file_path, title, author, user_id, book_id=None, genre=""):
     """
     Background worker:
      - extract text
@@ -352,14 +352,14 @@ def process_upload(upload_id, file_path, title, author, user_id, book_id=None):
             set_status_row(upload_id, status="error", error="No chunks produced from document")
             return
 
-        # prepare book registry entry
+        # prepare book registry entry WITH GENRE
         if book_id:
             metadata.setdefault("books", {})
             if book_id not in metadata["books"]:
                 metadata["books"][book_id] = {
                     "title": title,
                     "author": author,
-                    "genre": "",
+                    "genre": genre,  # NEW: Store genre
                     "filename": os.path.basename(file_path),
                     "upload_id": upload_id,
                     "vector_ids": [],
@@ -391,6 +391,7 @@ def process_upload(upload_id, file_path, title, author, user_id, book_id=None):
                     "book_id": book_id,
                     "title": title,
                     "author": author,
+                    "genre": genre,  # NEW: Include genre in vector metadata
                     "user_id": user_id,
                     "text": c["text"],
                     "start": c.get("start"),
@@ -422,6 +423,7 @@ def upload():
     user_id = request.form.get("user_id")
     title = request.form.get("title") or ""
     author = request.form.get("author") or ""
+    genre = request.form.get("genre") or ""  # NEW: Added genre
     book_id = request.form.get("book_id")
 
     if not f or not user_id or not title or not author:
@@ -434,7 +436,8 @@ def upload():
 
     set_status_row(upload_id, filename=filename, title=title, author=author, user_id=user_id, status="uploaded", processed_chunks=0, total_chunks=0)
 
-    t = threading.Thread(target=process_upload, args=(upload_id, path, title, author, user_id, book_id), daemon=True)
+    # Pass genre to background processor
+    t = threading.Thread(target=process_upload, args=(upload_id, path, title, author, user_id, book_id, genre), daemon=True)
     t.start()
 
     return jsonify({"upload_id": upload_id, "status": "started"})

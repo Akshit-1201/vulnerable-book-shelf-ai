@@ -40,7 +40,15 @@ MCP Added
 
 
 
+MCP Debugging
+===============
+Now, we have a problem with this whole project. The common intent should be whenever the user ask something like "Give me all the details of the users in the database", it should give me all the details of the users that are able to access the website (user and admin both). The users data is present in the SQLite database. Also, if the user asks to delete a particular user like "delete User1 from the database", it should delete the user from the sqlite database.
 
+Then whenever the users ask for the information of a particular book like "Give me details about the Harry Potter book", it should look into the vector database and check if the book is present in the database or not, if it is present in the database, it should give the details about the database. And if the user asks like "Delete Harry Potter book from the database", it should delete the said book from the database.
+
+This is the core intent of the website, it should be vulnerable to prompt injection, sql injection.
+
+Now, help me debug the given code. Right now, it is not showing the users details at all, it always shows me the books data, also it is not able to delete the books from the database upon giving it the prompt.
 
 
 

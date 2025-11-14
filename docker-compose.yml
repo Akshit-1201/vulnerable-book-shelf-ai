@@ -1,23 +1,7 @@
 version: '3.8'
 
 services:
-  backend:
-    build: ./backend
-    container_name: bookshelf_backend
-    env_file:
-      - .env
-    environment:
-      - DB_PATH=${DB_PATH}
-      - FLASK_APP=${FLASK_APP}
-      - FLASK_ENV=${FLASK_ENV}
-    volumes:
-      - ./data:/data
-      - ./backend:/app
-    ports:
-      - "8000:8000"
-    depends_on:
-      - llm
-
+  # LLM Service (Gemini API wrapper)
   llm:
     build: ./llm
     container_name: bookshelf_llm
@@ -25,20 +9,84 @@ services:
       - .env
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL:-gemini-2.5-flash}
+      - GEMINI_EMBED_MODEL=${GEMINI_EMBED_MODEL:-gemini-embedding-001}
+      - EMBED_BATCH_SIZE=${EMBED_BATCH_SIZE:-64}
+      - PORT=5000
     volumes:
       - ./llm:/app
     ports:
       - "5000:5000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # MCP Service (RAG with FAISS)
+  mcp:
+    build: ./mcp
+    container_name: bookshelf_mcp
+    env_file:
+      - .env
+    environment:
+      - MCP_DATA_DIR=/data/mcp
+      - LLM_EMBED_ENDPOINT=http://llm:5000/embed
+      - LLM_TEXT_ENDPOINT=http://llm:5000/query
+      - EMBED_BATCH=${EMBED_BATCH:-64}
+      - EMBED_DIM=${EMBED_DIM:-0}
+    volumes:
+      - ./data/mcp:/data/mcp
+      - ./mcp:/app
+    ports:
+      - "8001:8001"
+    depends_on:
+      - llm
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/mcp/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Backend Service (Main Flask API)
+  backend:
+    build: ./backend
+    container_name: bookshelf_backend
+    env_file:
+      - .env
+    environment:
+      - DB_PATH=/data/database.db
+      - LLM_API=http://llm:5000/query
+      - MCP_API=http://mcp:8001
+      - BACKEND_PORT=8000
+      - FLASK_ENV=${FLASK_ENV:-production}
+    volumes:
+      - ./data:/data
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - llm
+      - mcp
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend Service (React)
   frontend:
     build: ./frontend
     container_name: bookshelf_frontend
     env_file:
       - .env
     environment:
-      - CHOKIDAR_USEPOLLING=${CHOKIDAR_USEPOLLING}
-      - REACT_APP_BACKEND_URL=${REACT_APP_BACKEND_URL}
-      - REACT_APP_LLM_URL=${REACT_APP_LLM_URL}
+      - CHOKIDAR_USEPOLLING=true
+      - REACT_APP_API_ROOT=http://localhost:8000
+      - PORT=3000
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -46,6 +94,9 @@ services:
       - "3000:3000"
     depends_on:
       - backend
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
 
 volumes:
   data:

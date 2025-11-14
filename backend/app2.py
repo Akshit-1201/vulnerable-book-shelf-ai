@@ -1,204 +1,641 @@
+# backend/app.py (FIXED: proper user vs book intent detection)
 import os
-import sqlite3
-import time
+import re
 import json
 import logging
-from typing import Any, Dict, List, Optional
-from flask import Flask, request, jsonify, g
-from flask_cors import CORS
+import sqlite3
 import requests
+from typing import Optional, List, Dict, Any
+from flask import Flask, request, jsonify, make_response
+from flask_cors import CORS
 
-# ---------- Configuration ----------
-DB_PATH = os.getenv("DB_PATH", "../data/database.db")
-MCP_API = os.getenv("MCP_API", "http://127.0.0.1:8001")   # MCP service base URL
-LLM_API = os.getenv("LLM_API", "http://127.0.0.1:5000")   # LLM service base URL
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
-
-# ---------- Logging (clean) ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-)
-
+# -------------------- Config & Logging --------------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("backend")
 
-# ---------- Flask app ----------
 app = Flask(__name__)
-CORS(app)  # Keep CORS enabled; frontend uses localhost:3000
+CORS(app)
 
-# ---------- DB helpers ----------
+DEFAULT_DB = os.path.join(os.path.dirname(__file__), "../data/database.db")
+DB_PATH = os.getenv("DB_PATH", DEFAULT_DB)
+DB_PATH = os.path.abspath(DB_PATH)
+
+LLM_API = os.getenv("LLM_API", "http://127.0.0.1:5000/query")
+MCP_API = os.getenv("MCP_API", "http://127.0.0.1:8001")
+BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))
+
+DEFAULT_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "30"))
+
+# -------------------- Utilities --------------------
+def filter_resp_headers(headers: dict) -> dict:
+    hop_by_hop = {
+        "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+        "te", "trailer", "transfer-encoding", "upgrade"
+    }
+    return {k: v for k, v in headers.items() if k.lower() not in hop_by_hop}
+
+# ----------------------- DB Helpers -----------------------
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
-def run_sql_select(query: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
-    """
-    Run a SELECT statement and return list-of-dict rows.
-    """
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute(query, params or ())
-        rows = cur.fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
-
-def run_sql_modify(query: str, params: Optional[tuple] = None) -> int:
-    """
-    Run INSERT/UPDATE/DELETE. Returns lastrowid or number of affected rows.
-    Note: This helper uses parameterized queries when params provided.
-    """
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute(query, params or ())
-        conn.commit()
-        return cur.lastrowid if cur.lastrowid else cur.rowcount
-    finally:
-        conn.close()
-
-# Initialize minimal schema if missing (safe idempotent)
-def init_db():
-    logger.info("Ensuring database schema exists at %s", DB_PATH)
+def get_db_schema() -> Dict[str, List[str]]:
     conn = get_db_connection()
     cur = conn.cursor()
-    # Very minimal tables: users, books
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT,
-        email TEXT UNIQUE,
-        password TEXT,
-        phone TEXT,
-        role TEXT DEFAULT 'user',
-        created_at REAL
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS books (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT,
-        author TEXT,
-        genre TEXT,
-        status TEXT,
-        created_at REAL
-        -- You may optionally store mcp_book_id/upload_id here if you want to link
-    )
-    """)
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# ---------- Utility helpers ----------
-def json_ok(data):
-    return jsonify(data), 200
-
-def json_err(msg: str, code: int = 400):
-    return jsonify({"error": msg}), code
-
-def safe_extract_text_candidate(nl_text: str) -> str:
-    """
-    Heuristic to extract a likely book title from a natural-language deletion sentence.
-    Example inputs:
-      - "delete the Biomaterials book from your database"
-      - "please remove Biomaterials"
-      - "erase the book titled 'Biomaterials'"
-
-    Returns a cleaned candidate string for matching.
-    """
-    s = nl_text or ""
-    s = s.strip()
-    # remove polite words and common phrases
-    for pat in ["please", "kindly", "could you", "would you", "delete", "remove", "erase", "the", "book", "books", "from", "database", "your", "my", "library"]:
-        s = s.replace(pat, "")
-        s = s.replace(pat.title(), "")
-    # remove punctuation
-    s = s.replace("'", "").replace('"', "").replace(".", "").replace("?", "").strip()
-    return s
-
-def find_mcp_book_by_title_or_uploadid(candidate: str) -> Optional[Dict[str, Any]]:
-    """
-    Query MCP /mcp/list_books and try to find a matching entry by title, upload_id, or filename.
-    Matching strategy: exact lower-case match first, then substring match.
-    Returns the MCP book object (with book_id) or None.
-    """
     try:
-        resp = requests.get(f"{MCP_API}/mcp/list_books", timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
-        mbooks = data.get("books", []) if isinstance(data, dict) else data
-        cand = (candidate or "").strip().lower()
-        if not cand:
-            return None
-        # exact match
-        for b in mbooks:
-            title = (b.get("title") or "").strip().lower()
-            uid = (b.get("book_id") or "").strip().lower()
-            if title == cand or uid == cand:
-                return b
-        # substring match (title contains cand or cand contains title)
-        for b in mbooks:
-            title = (b.get("title") or "").strip().lower()
-            uid = (b.get("book_id") or "").strip().lower()
-            if cand in title or title in cand or cand in uid:
-                return b
-        return None
-    except Exception as e:
-        logger.warning("Could not query MCP list_books: %s", e)
-        return None
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = cur.fetchall()
+        schema = {}
+        for row in tables:
+            table = row[0]
+            if table.startswith("sqlite_"):
+                continue
+            cur.execute(f"PRAGMA table_info({table});")
+            cols = cur.fetchall()
+            schema[table] = [col[1] for col in cols]
+        return schema
+    finally:
+        conn.close()
 
-# ---------- Routes ----------
+def schema_as_text(schema: dict) -> str:
+    return "\n".join([f"- {table}({', '.join(cols)})" for table, cols in schema.items()])
+
+def run_sql_select(sql: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        if params:
+            cur.execute(sql, params)
+        else:
+            cur.execute(sql)
+        rows = cur.fetchall()
+        cols = [c[0] for c in cur.description] if cur.description else []
+        return [dict(zip(cols, row)) for row in rows]
+    finally:
+        conn.close()
+
+def run_sql_modify(sql: str, params: Optional[tuple] = None) -> int:
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        if params:
+            cur.execute(sql, params)
+        else:
+            cur.execute(sql)
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+# -------------------- Request logging --------------------
+@app.before_request
+def log_request_minimal():
+    try:
+        logger.info("Request: %s %s from %s", request.method, request.path, request.remote_addr)
+    except Exception:
+        logger.exception("Error while logging request")
+
+# -------------------- Health & Root --------------------
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({
+        "service": "backend",
+        "status": "running",
+        "db_path": DB_PATH,
+        "llm_api": LLM_API,
+        "mcp_api": MCP_API
+    })
 
 @app.route("/health", methods=["GET"])
 def health():
-    return json_ok({"status": "ok", "service": "backend", "mcp_api": MCP_API, "llm_api": LLM_API})
+    try:
+        conn = get_db_connection()
+        conn.execute("SELECT 1;")
+        conn.close()
+        db_ok = True
+    except Exception:
+        logger.exception("DB health check failed")
+        db_ok = False
+    return jsonify({"healthy": db_ok}), (200 if db_ok else 500)
 
-# --- Auth endpoints (simple, demo-only) ---
+@app.route("/version", methods=["GET"])
+def version():
+    return jsonify({
+        "name": "BookShelf-AI Backend",
+        "version": "1.0.0",
+        "db_path": DB_PATH,
+        "llm_api": LLM_API,
+        "mcp_api": MCP_API
+    })
+
+# ==================== AUTH ====================
 @app.route("/signup", methods=["POST"])
 def signup():
-    data = request.get_json(force=True, silent=True) or {}
-    username = data.get("username")
-    email = data.get("email")
-    password = data.get("password")
-    phone = data.get("phone", "")
-    if not username or not email or not password:
-        return json_err("username, email, password required", 400)
+    data = request.json or {}
+    required = ["username", "email", "password", "phone"]
+    if not all(k in data and str(data[k]).strip() for k in required):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
     try:
-        now = time.time()
-        # parameterized insert
-        run_sql_modify("INSERT INTO users (username, email, password, phone_number, created_at) VALUES (?, ?, ?, ?, ?)",
-                       (username, email, password, phone, now))
-        logger.info("New user signed up: %s", email)
-        # return newly created user id (best-effort)
-        rows = run_sql_select("SELECT id FROM users WHERE email = ?", (email,))
-        uid = rows[0]["id"] if rows else None
-        return json_ok({"message": "signup successful", "user_id": uid})
-    except Exception as e:
-        logger.exception("Signup failed")
-        return json_err(f"Signup failed: {e}", 500)
+        cur.execute(
+            "INSERT INTO users (username, email, password, phone_number, role) VALUES (?,?,?,?,?)",
+            (data["username"], data["email"], data["password"], data["phone"], "user"),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError as e:
+        conn.close()
+        return jsonify({"error": f"Integrity error: {e}"}), 400
+    except sqlite3.OperationalError:
+        try:
+            cur.execute(
+                "INSERT INTO users (username, email, password, phone_number) VALUES (?,?,?,?)",
+                (data["username"], data["email"], data["password"], data["phone"]),
+            )
+            conn.commit()
+        except Exception as e2:
+            conn.close()
+            return jsonify({"error": f"DB error: {e2}"}), 500
+    finally:
+        conn.close()
+
+    logger.info("New user created: %s", data.get("email"))
+    return jsonify({"message": "User Created"}), 201
 
 @app.route("/login", methods=["POST"])
 def login():
-    data = request.get_json(force=True, silent=True) or {}
-    email = data.get("email")
-    password = data.get("password")
-    if not email or not password:
-        return json_err("email and password required", 400)
-    try:
-        rows = run_sql_select("SELECT id, username, role FROM users WHERE email = ? AND password = ?", (email, password))
-        if not rows:
-            return json_err("invalid credentials", 401)
-        user = rows[0]
-        logger.info("User login: %s", email)
-        return json_ok({"message": "login successful", "user_id": user["id"], "username": user["username"], "role": user.get("role", "user")})
-    except Exception as e:
-        logger.exception("Login error")
-        return json_err("login failed", 500)
+    data = request.json or {}
+    email = (data.get("email") or "").strip()
+    password = (data.get("password") or "").strip()
 
-# --- Admin endpoints ---
+    if not email or not password:
+        return jsonify({"error": "Email and password required"}), 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE email=? AND password=?", (email, password))
+    user = cur.fetchone()
+    conn.close()
+
+    if user:
+        role = user["role"] if "role" in user.keys() else "user"
+        logger.info("User login: %s (role=%s)", email, role)
+        return jsonify({
+            "message": "Login Successful",
+            "role": role,
+            "user_id": user["id"],
+            "username": user["username"]
+        })
+    logger.info("Failed login attempt: %s", email)
+    return jsonify({"error": "Invalid Credentials"}), 401
+
+# ----------------------- IMPROVED INTENT DETECTION -----------------------
+GREET_RE = re.compile(r"\b(hi|hello|hey|hola|namaste|good (morning|afternoon|evening))\b", re.I)
+THANKS_RE = re.compile(r"\b(thanks|thank you|tysm)\b", re.I)
+BYE_RE = re.compile(r"\b(bye|goodbye|see ya|cya|see you)\b", re.I)
+
+def detect_intent(query: str) -> dict:
+    """
+    Enhanced intent detection that distinguishes between:
+    - user queries (SQLite)
+    - book queries (MCP/Vector DB)
+    - delete operations
+    - chitchat
+    
+    Returns: {
+        "intent": "user_query" | "book_query" | "delete_user" | "delete_book" | "chitchat",
+        "target": <extracted target if applicable>
+    }
+    """
+    ql = (query or "").lower().strip()
+    if not ql:
+        return {"intent": "unknown"}
+    
+    # Chitchat detection
+    if GREET_RE.search(ql) or THANKS_RE.search(ql) or BYE_RE.search(ql):
+        return {"intent": "chitchat"}
+    
+    # Delete detection
+    is_delete = any(word in ql for word in ["delete", "remove", "drop", "erase"])
+    
+    # USER-related keywords (strong indicators)
+    USER_KEYWORDS = [
+        "user", "users", "account", "accounts", "member", "members",
+        "login", "signup", "email", "password", "phone", "role",
+        "admin", "admins", "username", "usernames"
+    ]
+    
+    # BOOK-related keywords
+    BOOK_KEYWORDS = [
+        "book", "books", "author", "title", "genre", "rating", 
+        "published", "publisher", "isbn", "pages", "language", 
+        "summary", "chapter", "novel", "story"
+    ]
+    
+    # Count keyword occurrences
+    user_score = sum(1 for kw in USER_KEYWORDS if kw in ql)
+    book_score = sum(1 for kw in BOOK_KEYWORDS if kw in ql)
+    
+    # DELETE USER intent
+    if is_delete and user_score > 0:
+        # Try to extract user identifier
+        target = None
+        # Look for patterns like "delete user1", "remove User1", etc.
+        match = re.search(r'\b(?:delete|remove|erase)\s+(?:user\s+)?([a-zA-Z0-9_@.-]+)', ql, re.I)
+        if match:
+            target = match.group(1)
+        return {"intent": "delete_user", "target": target}
+    
+    # DELETE BOOK intent
+    if is_delete and (book_score > 0 or user_score == 0):
+        # Try to extract book title
+        target = None
+        # Remove common delete phrases to extract title
+        title_candidate = ql
+        for phrase in ["delete", "remove", "erase", "the book", "book", "from database", "from the database"]:
+            title_candidate = title_candidate.replace(phrase, " ")
+        target = title_candidate.strip()
+        return {"intent": "delete_book", "target": target}
+    
+    # USER QUERY intent (higher user keyword score)
+    if user_score > book_score:
+        return {"intent": "user_query"}
+    
+    # BOOK QUERY intent (higher book keyword score or default)
+    if book_score > 0:
+        return {"intent": "book_query"}
+    
+    # Check for database-related queries without specific context
+    DB_GENERAL_KEYWORDS = ["table", "database", "db", "show", "list", "all", "everything"]
+    if any(kw in ql for kw in DB_GENERAL_KEYWORDS):
+        # If "users" mentioned anywhere, prioritize user query
+        if "user" in ql:
+            return {"intent": "user_query"}
+        # Otherwise could be book query
+        return {"intent": "book_query"}
+    
+    # Default: treat as book query (for backward compatibility)
+    return {"intent": "book_query"}
+
+# ----------------------- LLM Helpers -----------------------
+def llm_text(prompt: str) -> str:
+    try:
+        r = requests.post(LLM_API, json={"prompt": prompt, "mode": "text"}, timeout=DEFAULT_TIMEOUT)
+        r.raise_for_status()
+        return (r.json().get("text") or "").strip()
+    except Exception:
+        logger.exception("LLM text call failed")
+        return "I'm BookShelf-AI. I can help with user and book queries from our database."
+
+def llm_sql(prompt: str) -> str:
+    try:
+        r = requests.post(LLM_API, json={"prompt": prompt, "mode": "sql"}, timeout=DEFAULT_TIMEOUT)
+        r.raise_for_status()
+        return (r.json().get("sql") or "").strip()
+    except Exception:
+        logger.exception("LLM SQL call failed")
+        return ""
+
+def generate_sql(query: str, schema_text: str, allow_modify: bool = False) -> Optional[str]:
+    allowed_operations = "SELECT" if not allow_modify else "SELECT, INSERT, UPDATE, DELETE"
+    prompt = f"""
+You are a text-to-SQL assistant for a SQLite database.
+
+User request: {query}
+
+Database schema:
+{schema_text}
+
+Rules:
+- Output ONLY a single valid SQLite statement ({allowed_operations}).
+- Do NOT include explanations, markdown, comments, or multiple statements.
+- Use exact table and column names as in the schema.
+- If the request cannot be answered with the schema, return exactly: NO_SQL
+"""
+    raw_sql = llm_sql(prompt)
+    if not raw_sql or "NO_SQL" in raw_sql:
+        return ""
+    if not allow_modify:
+        if raw_sql.strip().lower().startswith(("insert", "update", "delete", "drop", "create", "alter")):
+            return ""
+    sql_pattern = r"(?is)\b(select|insert|update|delete)\b.*"
+    m = re.search(sql_pattern, raw_sql)
+    return m.group(0).strip() if m else ""
+
+def summarize_results(rows, user_query: str) -> str:
+    preview = rows[:20]
+    prompt = f"""
+You are BookShelf-AI. Summarize the following SQLite query results for the user.
+
+User query: {user_query}
+
+Results JSON (preview, up to 20 rows):
+{json.dumps(preview, ensure_ascii=False)}
+
+Write a concise, friendly answer. Use bullet points if helpful. Do not invent fields.
+"""
+    return llm_text(prompt)
+
+# ==================== MAIN SEARCH ENDPOINT (FIXED) ====================
+@app.route("/search", methods=["POST"])
+def search():
+    data = request.get_json(silent=True) or {}
+    query = (data.get("query") or "").strip()
+    user_id = data.get("user_id")
+
+    if not query:
+        return jsonify({"error": "Empty query"}), 400
+
+    # Detect intent
+    intent_result = detect_intent(query)
+    intent = intent_result["intent"]
+    target = intent_result.get("target")
+    
+    logger.info(f"Intent detected: {intent} | Target: {target} | Query: {query}")
+
+    schema = get_db_schema()
+    schema_text = schema_as_text(schema)
+
+    # ==================== CHITCHAT ====================
+    if intent == "chitchat":
+        answer = llm_text(f"You are BookShelf-AI, a friendly assistant. Respond to: {query}")
+        return jsonify({
+            "results": [],
+            "generated_sql": "",
+            "answer": answer,
+            "intent": "chitchat"
+        })
+
+    # ==================== DELETE USER ====================
+    if intent == "delete_user":
+        # Generate DELETE SQL for users table
+        sql = generate_sql(query, schema_text, allow_modify=True)
+        
+        if not sql or not sql.strip().lower().startswith("delete"):
+            return jsonify({
+                "results": [{"error": "Could not generate valid DELETE statement for user"}],
+                "generated_sql": sql or "",
+                "answer": "I couldn't understand which user to delete. Please specify the username, email, or user ID.",
+                "intent": "delete_user_failed"
+            }), 400
+
+        # Ensure it's targeting the users table
+        if "users" not in sql.lower():
+            return jsonify({
+                "results": [{"error": "SQL doesn't target users table"}],
+                "generated_sql": sql,
+                "answer": "The generated SQL doesn't target the users table. Please try again.",
+                "intent": "delete_user_rejected"
+            }), 400
+
+        try:
+            affected_rows = run_sql_modify(sql)
+            answer = f"Successfully deleted {affected_rows} user(s) from the database."
+            logger.info(f"Deleted {affected_rows} user(s) with SQL: {sql}")
+            return jsonify({
+                "results": [{"affected_rows": affected_rows}],
+                "generated_sql": sql,
+                "answer": answer,
+                "intent": "delete_user_success"
+            })
+        except Exception as e:
+            logger.exception("Error executing delete user SQL")
+            return jsonify({
+                "results": [{"error": str(e)}],
+                "generated_sql": sql,
+                "answer": f"Error deleting user: {str(e)}",
+                "intent": "delete_user_error"
+            }), 500
+
+    # ==================== DELETE BOOK ====================
+    if intent == "delete_book":
+        # Try to delete from MCP first (vector database)
+        try:
+            # Get list of books from MCP
+            mcp_resp = requests.get(f"{MCP_API}/mcp/list_books", timeout=10)
+            if mcp_resp.ok:
+                books = mcp_resp.json().get("books", [])
+                
+                # Find matching book
+                target_lower = (target or "").lower()
+                matched_book = None
+                
+                for book in books:
+                    title = (book.get("title") or "").lower()
+                    if target_lower in title or title in target_lower:
+                        matched_book = book
+                        break
+                
+                if matched_book:
+                    # Delete from MCP
+                    book_id = matched_book.get("book_id")
+                    del_resp = requests.post(f"{MCP_API}/mcp/delete_book", json={"book_id": book_id}, timeout=30)
+                    
+                    if del_resp.ok:
+                        return jsonify({
+                            "results": [{"deleted": matched_book}],
+                            "generated_sql": "",
+                            "answer": f"Successfully deleted '{matched_book.get('title')}' by {matched_book.get('author')} from the vector database.",
+                            "intent": "delete_book_success"
+                        })
+                    else:
+                        return jsonify({
+                            "results": [{"error": del_resp.text}],
+                            "generated_sql": "",
+                            "answer": f"Failed to delete book from MCP: {del_resp.text}",
+                            "intent": "delete_book_error"
+                        }), 500
+                else:
+                    return jsonify({
+                        "results": [{"info": "Book not found in vector database"}],
+                        "generated_sql": "",
+                        "answer": f"Could not find a book matching '{target}' in the vector database.",
+                        "intent": "delete_book_not_found"
+                    }), 404
+        except Exception as e:
+            logger.exception("Error deleting book from MCP")
+            return jsonify({
+                "results": [{"error": str(e)}],
+                "generated_sql": "",
+                "answer": f"Error deleting book: {str(e)}",
+                "intent": "delete_book_error"
+            }), 500
+
+    # ==================== USER QUERY (SQLite) ====================
+    if intent == "user_query":
+        sql = generate_sql(query, schema_text, allow_modify=False)
+        
+        if not sql:
+            return jsonify({
+                "results": [{"info": "Could not generate SQL for user query"}],
+                "generated_sql": "",
+                "answer": "I couldn't generate a valid SQL query for your request. Try asking about specific users by username, email, or role.",
+                "intent": "user_query_failed"
+            })
+
+        if not sql.strip().lower().startswith("select"):
+            return jsonify({
+                "results": [{"error": "Only SELECT allowed for user queries"}],
+                "generated_sql": sql,
+                "answer": "For safety, only read-only SELECT queries are allowed.",
+                "intent": "user_query_rejected"
+            }), 400
+
+        try:
+            rows = run_sql_select(sql)
+            answer = summarize_results(rows, query)
+            logger.info(f"User query returned {len(rows)} rows")
+            return jsonify({
+                "results": rows,
+                "generated_sql": sql,
+                "answer": answer,
+                "intent": "user_query"
+            })
+        except Exception as e:
+            logger.exception("Error running user query SQL")
+            return jsonify({
+                "results": [{"error": str(e)}],
+                "generated_sql": sql,
+                "answer": f"Error executing query: {str(e)}",
+                "intent": "user_query_error"
+            }), 500
+
+    # ==================== BOOK QUERY (MCP/Vector DB) ====================
+    if intent == "book_query":
+        # Try MCP RAG search first
+        try:
+            rag_resp = requests.post(f"{MCP_API}/mcp/search", json={
+                "query": query,
+                "user_id": user_id
+            }, timeout=20)
+            if rag_resp.ok:
+                rag_data = rag_resp.json()
+                if rag_data.get("answer") or rag_data.get("results"):
+                    return jsonify(rag_data)
+        except Exception as e:
+            logger.exception("MCP search failed, falling back to SQL")
+
+        # Fallback to SQL for books table
+        sql = generate_sql(query, schema_text, allow_modify=False)
+        if not sql:
+            answer = llm_text(f"The user asked: {query}\nWe could not find relevant information. Suggest asking about books by title, author, or genre.")
+            return jsonify({
+                "results": [{"info": "No SQL generated"}],
+                "generated_sql": "",
+                "answer": answer,
+                "intent": "book_query_failed"
+            })
+
+        if not sql.strip().lower().startswith("select"):
+            return jsonify({
+                "results": [{"error": "Only SELECT allowed"}],
+                "generated_sql": sql,
+                "answer": "Only read-only queries are allowed.",
+                "intent": "book_query_rejected"
+            }), 400
+
+        try:
+            rows = run_sql_select(sql)
+            answer = summarize_results(rows, query)
+            return jsonify({
+                "results": rows,
+                "generated_sql": sql,
+                "answer": answer,
+                "intent": "book_query"
+            })
+        except Exception as e:
+            logger.exception("Error running book query SQL")
+            return jsonify({
+                "results": [{"error": str(e)}],
+                "generated_sql": sql,
+                "answer": f"Error: {str(e)}",
+                "intent": "book_query_error"
+            }), 500
+
+    # Default fallback
+    return jsonify({
+        "results": [],
+        "generated_sql": "",
+        "answer": "I didn't understand your request. Please ask about users or books in the database.",
+        "intent": "unknown"
+    })
+
+# ==================== ADMIN ENDPOINTS ====================
+@app.route("/books", methods=["GET"])
+def list_books():
+    try:
+        rows = run_sql_select("SELECT id, title, author, genre, COALESCE(status, '') AS status FROM books;")
+        return jsonify({"books": rows})
+    except Exception as e:
+        logger.exception("Error listing books")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/admin/add_book", methods=["POST"])
+def admin_add_book():
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    author = (data.get("author") or "").strip()
+    genre = (data.get("genre") or "").strip()
+    if not title or not author:
+        return jsonify({"error": "title & author required"}), 400
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO books (title, author, genre) VALUES (?,?,?)",
+            (title, author, genre)
+        )
+        conn.commit()
+        conn.close()
+        logger.info("Added book: %s by %s", title, author)
+        return jsonify({"message": "Book added"}), 201
+    except Exception as e:
+        logger.exception("Error adding book")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/admin/edit_book/<int:book_id>", methods=["PUT"])
+def admin_edit_book(book_id):
+    data = request.get_json(silent=True) or {}
+    fields = []
+    vals = []
+    for k in ("title", "author", "genre"):
+        if k in data:
+            fields.append(f"{k} = ?")
+            vals.append(data[k])
+    if not fields:
+        return jsonify({"error": "No fields to update"}), 400
+    vals.append(book_id)
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(f"UPDATE books SET {', '.join(fields)} WHERE id = ?", vals)
+        conn.commit()
+        affected = cur.rowcount
+        conn.close()
+        logger.info("Edited book id=%s affected=%s", book_id, affected)
+        return jsonify({"message": "Book updated", "affected": affected})
+    except Exception as e:
+        logger.exception("Error editing book")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/admin/delete_book/<int:book_id>", methods=["DELETE"])
+def admin_delete_book(book_id):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM books WHERE id = ?", (book_id,))
+        conn.commit()
+        affected = cur.rowcount
+        conn.close()
+        logger.info("Deleted book id=%s affected=%s", book_id, affected)
+        return jsonify({"message": "Book deleted", "affected": affected})
+    except Exception as e:
+        logger.exception("Error deleting book")
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/admin/users", methods=["GET"])
 def admin_users():
     try:
@@ -229,6 +666,7 @@ def admin_add_user():
         )
         conn.commit()
         conn.close()
+        logger.info("Added user: %s (role=%s)", username, role)
         return jsonify({"message": "User added"}), 201
     except sqlite3.IntegrityError as e:
         logger.exception("Integrity error adding user")
@@ -263,6 +701,7 @@ def admin_edit_user(user_id):
         conn.commit()
         affected = cur.rowcount
         conn.close()
+        logger.info("Edited user id=%s affected=%s", user_id, affected)
         return jsonify({"message": "User updated", "affected": affected})
     except Exception as e:
         logger.exception("Error editing user")
@@ -277,178 +716,67 @@ def admin_delete_user(user_id):
         conn.commit()
         affected = cur.rowcount
         conn.close()
+        logger.info("Deleted user id=%s affected=%s", user_id, affected)
         return jsonify({"message": "User deleted", "affected": affected})
     except Exception as e:
         logger.exception("Error deleting user")
         return jsonify({"error": str(e)}), 500
 
-# --- Books endpoints (backend DB) ---
-@app.route("/books", methods=["GET"])
-def list_books():
-    try:
-        rows = run_sql_select("SELECT id, title, author, genre, status, created_at FROM books ORDER BY created_at DESC")
-        # Note: we do not include MCP book_id here by default (unless you store it)
-        return json_ok({"books": rows})
-    except Exception as e:
-        logger.exception("Failed to list books")
-        return json_err("failed to list books", 500)
-
-@app.route("/admin/add_book", methods=["POST"])
-def admin_add_book():
-    data = request.get_json(force=True, silent=True) or {}
-    title = data.get("title")
-    author = data.get("author", "")
-    genre = data.get("genre", "")
-    if not title:
-        return json_err("title required", 400)
-    try:
-        now = time.time()
-        rid = run_sql_modify("INSERT INTO books (title, author, genre, status, created_at) VALUES (?, ?, ?, ?, ?)",
-                             (title, author, genre, "created", now))
-        logger.info("Book added to backend DB: %s (id=%s)", title, rid)
-        return json_ok({"message": "book added", "id": rid})
-    except Exception as e:
-        logger.exception("Failed to add book")
-        return json_err("failed to add book", 500)
-
-@app.route("/admin/delete_book/<int:book_id>", methods=["DELETE"])
-def admin_delete_book(book_id: int):
-    """
-    Deletes the book row from backend DB only.
-    This does not touch the MCP index unless you call MCP separately.
-    """
-    try:
-        # remove row
-        affected = run_sql_modify("DELETE FROM books WHERE id = ?", (book_id,))
-        if affected == 0:
-            return json_err("book id not found", 404)
-        logger.info("Deleted backend book id=%s", book_id)
-        return json_ok({"status": "deleted", "backend_deleted_rows": affected})
-    except Exception as e:
-        logger.exception("Failed to delete backend book")
-        return json_err("failed to delete book", 500)
-
-# --- Proxy to MCP endpoints (optional convenience) ---
-@app.route("/mcp/search", methods=["POST", "OPTIONS"])
-def proxy_mcp_search():
-    # Flask-CORS will handle OPTIONS headers; respond normally for POST
-    if request.method == "OPTIONS":
-        return ("", 200)
-    try:
-        body = request.get_json(force=True, silent=True) or {}
-        resp = requests.post(f"{MCP_API}/mcp/search", json=body, timeout=REQUEST_TIMEOUT)
-        return (resp.content, resp.status_code, resp.headers.items())
-    except Exception as e:
-        logger.exception("Proxy to MCP /mcp/search failed")
-        return json_err("proxy to MCP failed", 500)
-
+# ==================== MCP / INGEST ====================
 @app.route("/ingest", methods=["POST"])
-def ingest_proxy():
+def ingest():
     """
-    Proxy file upload to MCP /mcp/upload so frontend can post to backend /ingest.
+    Receives multipart/form-data from frontend and proxies the upload to the MCP service.
+    Expected form fields: pdf (file), user_id, title, author, genre, book_id (optional)
+    Returns whatever MCP returns.
     """
+    user_id = request.form.get("user_id")
+    title = request.form.get("title")
+    author = request.form.get("author")
+    genre = request.form.get("genre")  # NEW: Added genre
+    book_id = request.form.get("book_id")
+    pdf = request.files.get("pdf")
+
+    if not user_id or not title or not author or not pdf:
+        return jsonify({"error": "Missing Required Fields: user_id, title, author, pdf"}), 400
+
     try:
-        if "pdf" not in request.files:
-            return json_err("pdf file required", 400)
-        files = {"pdf": (request.files["pdf"].filename, request.files["pdf"].stream, request.files["pdf"].mimetype)}
-        # forward other form fields
-        data = {k: v for k, v in request.form.items()}
-        resp = requests.post(f"{MCP_API}/mcp/upload", files=files, data=data, timeout=120)
-        return (resp.content, resp.status_code, resp.headers.items())
-    except Exception as e:
-        logger.exception("Ingest proxy failed")
-        return json_err("ingest failed", 500)
+        # Ensure the file stream is at start
+        try:
+            pdf.stream.seek(0)
+        except Exception:
+            pass
+
+        files = {"pdf": (pdf.filename, pdf.stream, pdf.mimetype)}
+        data = {"user_id": user_id, "title": title, "author": author}
+        
+        # Add genre if provided
+        if genre:
+            data["genre"] = genre
+            
+        if book_id:
+            data["book_id"] = book_id
+
+        resp = requests.post(f"{MCP_API}/mcp/upload", files=files, data=data, timeout=300)
+        headers = filter_resp_headers(resp.headers)
+        logger.info("Forwarded ingest upload for user_id=%s title=%s genre=%s (status=%s)", 
+                   user_id, title, genre or "N/A", resp.status_code)
+        return (resp.content, resp.status_code, headers)
+    except Exception:
+        logger.exception("Failed to forward to MCP")
+        return jsonify({"error": "Failed to forward to MCP"}), 500
 
 @app.route("/ingest/status/<upload_id>", methods=["GET"])
-def ingest_status_proxy(upload_id):
+def ingest_status(upload_id):
     try:
-        resp = requests.get(f"{MCP_API}/mcp/status/{upload_id}", timeout=REQUEST_TIMEOUT)
-        return (resp.content, resp.status_code, resp.headers.items())
-    except Exception as e:
-        logger.warning("Could not query MCP status for upload_id=%s: %s", upload_id, e)
-        return json_err("mcp status unavailable", 500)
-
-# --- Natural-language delete endpoint (server-side) ---
-@app.route("/admin/nl_delete", methods=["POST"])
-def admin_nl_delete():
-    """
-    Accepts JSON: { "nl": "delete the Biomaterials book from your database" }
-    Attempts to:
-      1) extract a title candidate
-      2) find MCP book via /mcp/list_books
-      3) call MCP /mcp/delete_book {book_id}
-      4) remove backend book row if present
-    """
-    body = request.get_json(force=True, silent=True) or {}
-    nl = body.get("nl", "")
-    if not nl or not isinstance(nl, str):
-        return json_err("nl (natural language) required", 400)
-
-    # Heuristic extraction
-    candidate = safe_extract_text_candidate(nl)
-    if not candidate:
-        return json_err("could not extract book title from natural language", 400)
-
-    logger.info("NL delete request; candidate='%s'", candidate)
-    # Find MCP book
-    mbook = find_mcp_book_by_title_or_uploadid(candidate)
-    if not mbook:
-        logger.info("No MCP book matched candidate='%s'", candidate)
-        return json_err("no matching book found in MCP registry", 404)
-
-    book_id = mbook.get("book_id")
-    if not book_id:
-        logger.warning("MCP book missing book_id for entry: %s", mbook)
-        return json_err("matched MCP entry missing book_id", 500)
-
-    # Call MCP delete endpoint
-    try:
-        dresp = requests.post(f"{MCP_API}/mcp/delete_book", json={"book_id": book_id}, timeout=REQUEST_TIMEOUT)
-        if dresp.status_code >= 400:
-            logger.warning("MCP delete returned status %s: %s", dresp.status_code, dresp.text[:200])
-            return (dresp.content, dresp.status_code, dresp.headers.items())
-    except Exception as e:
-        logger.exception("MCP delete call failed for book_id=%s", book_id)
-        return json_err("mcp delete failed", 500)
-
-    logger.info("MCP deleted book_id=%s successfully; now removing backend record if exists", book_id)
-
-    # Try to remove backend book row if it matches title/author
-    try:
-        # Attempt to delete by title match (vulnerable behavior preserved only for LLM SQL -- here we use parameterized query)
-        affected = run_sql_modify("DELETE FROM books WHERE lower(title) = ?", (candidate.lower(),))
-        # If none deleted, try substring match
-        if affected == 0:
-            affected = run_sql_modify("DELETE FROM books WHERE lower(title) LIKE ?", (f"%{candidate.lower()}%",))
-        logger.info("Backend delete affected rows=%s", affected)
+        resp = requests.get(f"{MCP_API}/mcp/status/{upload_id}", timeout=DEFAULT_TIMEOUT)
+        headers = filter_resp_headers(resp.headers)
+        return (resp.content, resp.status_code, headers)
     except Exception:
-        logger.exception("Backend book row removal failed (non-fatal)")
+        logger.exception("Failed to contact MCP status")
+        return jsonify({"error": "Failed to contact MCP status"}), 500
 
-    return json_ok({"status": "deleted", "mcp_book_id": book_id})
-
-# --- LLM SQL execution endpoint (intentionally vulnerable demo) ---
-@app.route("/llm/sql_execute", methods=["POST"])
-def llm_sql_execute():
-    """
-    Demo endpoint that accepts raw SQL from the LLM and executes it.
-    JSON: { "sql": "<sql_string>" }
-    WARNING: This intentionally executes raw SQL without sanitization for the vulnerable demo.
-    """
-    body = request.get_json(force=True, silent=True) or {}
-    raw_sql = body.get("sql", "")
-    if not raw_sql:
-        return json_err("sql required", 400)
-    try:
-        # Intentionally executing raw SQL (vulnerable by design for the project)
-        rows = run_sql_select(raw_sql)  # may raise if not SELECT
-        return json_ok({"rows": rows})
-    except Exception as e:
-        logger.exception("LLM SQL execution failed")
-        return json_err(f"llm sql execution failed: {e}", 500)
-
-# ---------- App entry ----------
+# -------------------- Run --------------------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8000"))
-    logger.info("Starting backend on port %s", port)
-    # Run without debug to keep logs clean; Flask reloader may print extra messages but we avoid debug logs
-    app.run(host="0.0.0.0", port=port, debug=False)
+    logger.info("Starting backend on 0.0.0.0:%s", BACKEND_PORT)
+    app.run(host="0.0.0.0", port=BACKEND_PORT, debug=False)
