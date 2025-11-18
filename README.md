@@ -113,3 +113,36 @@ vulnerable-book-shelf-ai
 └─ README.md
 
 ```
+
+                 ┌───────────────────────────────────────────┐
+                 │               FRONTEND (React)            │
+                 │  Search · Login · Signup · Admin Panel    │
+                 └───────────────▲───────────────────────────┘
+                                 │
+                                 │ REST API
+                                 ▼
+             ┌───────────────────────────────────────────────────┐
+             │              BACKEND API (Flask)                  │
+             │ Intent Detection · LLM SQL · User Auth            │
+             │ Query Routing: SQLite ↔ MCP                       │
+             └───────────────▲────────────────────────────┬──────┘
+                             │                            │
+                      SQL Queries                    Book Vector Search
+                             │                            │
+                       ┌─────▼─────┐     Similarity      ▼
+                       │  SQLite   │ <────────────── FAISS Index
+                       └───────────┘                      │
+                                                          │ Metadata
+                                                          ▼
+                           ┌────────────────────────────────────────┐
+                           │              MCP Service               │
+                           │ Extract Text · Chunk · Embed · RAG     │
+                           └──────────────────▲─────────────────────┘
+                                              │
+                                        Embedding Requests
+                                              │
+                                              ▼
+                          ┌────────────────────────────────────────┐
+                          │              LLM Service               │
+                          │  Gemini Text Model · Embedding Model   │
+                          └────────────────────────────────────────┘  

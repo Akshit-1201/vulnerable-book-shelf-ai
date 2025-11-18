@@ -6,12 +6,12 @@ export default function Login({ onLogin }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [loading, setLoading] = useState(false);
+  // const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
   const handleLogin = async (e) => {
     e.preventDefault();
-    setLoading(true);
+    // setLoading(true);
 
     try {
       const res = await axios.post("http://127.0.0.1:8000/login", {
@@ -48,7 +48,7 @@ export default function Login({ onLogin }) {
       const errorMsg = err.response?.data?.error || err.message;
       alert("Login failed: " + errorMsg);
     } finally {
-      setLoading(false);
+      // setLoading(false);
     }
   };
 
