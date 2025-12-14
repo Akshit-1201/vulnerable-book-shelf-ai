@@ -32,87 +32,10 @@ Phase 1: Concept & Roadmap
     
     *   Queries are executed without sanitization.
         
-    *   Demonstrates how attacker can extract or destroy data.s
+    *   Demonstrates how attacker can extract or destroy data.
 
-==================
-### Architecture Diagram
-```mermaid
-flowchart LR
-  subgraph FE["Frontend"]
-    A[(User - Queries)]
-  end
 
-  subgraph BE["Backend (Flask)"]
-    B1["API Layer - REST / Uploads"]
-    B2["Relational DB (SQLite)"]
-  end
-
-  subgraph LLM["LLM Service"]
-    C["LLM (local or external)"]
-  end
-
-  %% Connections
-  A --> |"REST"| B1
-  B1 --> B2
-  B1 --> |"prompt + context"| C
-  C --> |"inference / summary"| B1
-  B1 --> |"response"| A
-
-```
-
-======================
-#### Project Structure:
-vulnerable-book-shelf-ai
-├─ backend
-│  ├─ .dockerignore
-│  ├─ app.py
-│  ├─ Dockerfile
-│  └─ requirements.txt
-├─ data
-│  ├─ database.db
-│  └─ init_db.py
-├─ docker-compose.yml
-├─ frontend
-│  ├─ .dockerignore
-│  ├─ Dockerfile
-│  ├─ package-lock.json
-│  ├─ package.json
-│  ├─ postcss.config.js
-│  ├─ public
-│  │  ├─ favicon.ico
-│  │  ├─ index.html
-│  │  ├─ logo192.png
-│  │  ├─ logo512.png
-│  │  ├─ manifest.json
-│  │  └─ robots.txt
-│  ├─ README.md
-│  ├─ src
-│  │  ├─ App.css
-│  │  ├─ App.js
-│  │  ├─ App.test.js
-│  │  ├─ components
-│  │  │  ├─ AdminPanel.js
-│  │  │  ├─ EditUser.js
-│  │  │  ├─ Login.js
-│  │  │  ├─ Navbar.js
-│  │  │  ├─ Search.js
-│  │  │  └─ Signup.js
-│  │  ├─ index.css
-│  │  ├─ index.js
-│  │  ├─ logo.svg
-│  │  ├─ reportWebVitals.js
-│  │  └─ setupTests.js
-│  └─ tailwind.config.js
-├─ llm
-│  ├─ .dockerignore
-│  ├─ app.py
-│  ├─ Dockerfile
-│  └─ requirements.txt
-├─ lol.txt
-├─ prompt.txt
-└─ README.md
-
-```
+# Architecture Diagram
 
                  ┌───────────────────────────────────────────┐
                  │               FRONTEND (React)            │
