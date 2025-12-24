@@ -237,7 +237,13 @@ def embed():
                 logger.debug("genai.embed_content failed: %s", e_embed)
                 # fallback attempt
                 try:
-                    raw_result = genai.embeddings.create(model=EMBEDDING_MODEL, input=batch)
+                    # raw_result = genai.embeddings.create(model=EMBEDDING_MODEL, input=batch)
+                    raw_result = genai.embed_content(
+                        model=EMBEDDING_MODEL,
+                        content=batch,
+                        task_type="retrieval_document"  # or "retrieval_query" depending on use case
+                        )
+                    
                 except Exception as e_fb2:
                     logger.exception("Embedding calls failed for batch")
                     return jsonify({"error": "Embedding call failed for batch", "detail": str(e_fb2)}), 500

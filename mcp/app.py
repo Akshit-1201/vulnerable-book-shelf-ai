@@ -589,15 +589,34 @@ def get_book(book_id):
 @APP.route("/mcp/delete_book", methods=["POST"])
 def delete_book():
     """
-    Request JSON: { "book_id": "..." }
+    Request JSON: { "book_id": "..." } or { "upload_id": "..." }
     Deletes all vectors and metadata for the book and rebuilds the FAISS index.
     """
+    global _index  # Declare _index as global since we're modifying it
+    
     body = request.get_json(force=True) or {}
     book_id = body.get("book_id")
-    if not book_id:
-        return jsonify({"error": "book_id required"}), 400
+    upload_id = body.get("upload_id")
+    
+    # Accept either book_id or upload_id
+    if not book_id and not upload_id:
+        return jsonify({"error": "book_id or upload_id required"}), 400
+    
+    # If upload_id provided, try to find the book_id
+    if not book_id and upload_id:
+        # Search for book by upload_id
+        for bid, bdata in metadata.get("books", {}).items():
+            if bdata.get("upload_id") == upload_id:
+                book_id = bid
+                break
+    
+    # Check if book exists
     if book_id not in metadata.get("books", {}):
-        return jsonify({"error": "book_id not found"}), 404
+        # If still not found, try using upload_id as book_id (fallback)
+        if upload_id and upload_id in metadata.get("books", {}):
+            book_id = upload_id
+        else:
+            return jsonify({"error": f"Book not found with book_id={book_id} or upload_id={upload_id}"}), 404
 
     remove_vids = set(metadata["books"][book_id].get("vector_ids", []))
     # remove vectors and index mapping
@@ -616,8 +635,10 @@ def delete_book():
             if metadata.get("embed_dim", 0):
                 init_faiss(metadata.get("embed_dim"))
             else:
-                _ = None
-            faiss.write_index(_index) if _index is not None else None
+                _index = None
+            # FIXED: Add index_path parameter to write_index
+            if _index is not None:
+                faiss.write_index(_index, index_path)
             return jsonify({"status": "deleted", "remaining_vectors": 0})
 
         emb_list = []
@@ -632,6 +653,7 @@ def delete_book():
         emb_np = normalize_vectors(emb_np)
         init_faiss(emb_np.shape[1])
         _index.add(emb_np)
+        # FIXED: Proper faiss.write_index call with both parameters
         faiss.write_index(_index, index_path)
         return jsonify({"status": "deleted", "remaining_vectors": len(remaining_vids)})
     except Exception as e:
@@ -642,6 +664,24 @@ def delete_book():
 @APP.route("/mcp/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "indexed_vectors": len(metadata.get("index_id_list", [])), "embed_dim": metadata.get("embed_dim", 0)})
+
+# Debug endpoint to see all book IDs
+@APP.route("/mcp/debug/books", methods=["GET"])
+def debug_books():
+    """Debug endpoint to see all book IDs and their metadata"""
+    books_info = {}
+    for bid, bdata in metadata.get("books", {}).items():
+        books_info[bid] = {
+            "book_id": bid,
+            "upload_id": bdata.get("upload_id"),
+            "title": bdata.get("title"),
+            "author": bdata.get("author"),
+            "vector_count": len(bdata.get("vector_ids", []))
+        }
+    return jsonify({
+        "total_books": len(books_info),
+        "books": books_info
+    })
 
 if __name__ == "__main__":
     print("[mcp] Starting MCP service on port 8001")
